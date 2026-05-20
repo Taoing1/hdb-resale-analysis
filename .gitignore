@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.parquet
+*.parquet.crc
+*.egg-info/
+dist/
+build/
+.env
+.streamlit/secrets.toml
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
