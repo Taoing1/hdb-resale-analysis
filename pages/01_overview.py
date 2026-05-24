@@ -225,16 +225,37 @@ def _render_stats_dashboard(df: pd.DataFrame, filtered: pd.DataFrame):
     """Dynamic statistics dashboard with metrics, deltas, and town breakdown."""
     st.subheader("📊 统计看板")
 
-    # ---- Row 1: Primary KPIs (6 cards) ----
-    cols = st.columns(6)
-    metrics = [
+    # ---- Row 1: Primary KPIs (8 cards) ----
+    avg_psm = filtered["price_per_sqm"].mean()
+    all_avg_psm = df["price_per_sqm"].mean()
+    cols = st.columns(4)
+    metrics_row1 = [
         ("交易套数", len(filtered), f"{len(filtered)/len(df)*100:.1f}% 占比" if len(df) > 0 else None),
-        ("均价", filtered["resale_price"].mean(), _delta_str(df["resale_price"].mean(), filtered["resale_price"].mean())),
-        ("中位数", filtered["resale_price"].median(), _delta_str(df["resale_price"].median(), filtered["resale_price"].median())),
+        ("平均总价", filtered["resale_price"].mean(), _delta_str(df["resale_price"].mean(), filtered["resale_price"].mean())),
+        ("中位总价", filtered["resale_price"].median(), _delta_str(df["resale_price"].median(), filtered["resale_price"].median())),
         ("总成交额", filtered["resale_price"].sum(), None),
-        ("最高价", filtered["resale_price"].max(), None),
-        ("最低价", filtered["resale_price"].min(), None),
     ]
+    for i, (label, val, delta) in enumerate(metrics_row1):
+        with cols[i]:
+            if isinstance(val, float):
+                st.metric(label, fmt_price(val), delta=delta)
+            else:
+                st.metric(label, f"{val:,}" if isinstance(val, int) else fmt_price(val), delta=delta)
+
+    cols2 = st.columns(4)
+    metrics_row2 = [
+        ("平均单价", avg_psm, _delta_str(all_avg_psm, avg_psm)),
+        ("最高单价", filtered["price_per_sqm"].max(), None),
+        ("最低单价", filtered["price_per_sqm"].min(), None),
+        ("最高总价", filtered["resale_price"].max(), None),
+    ]
+    for i, (label, val, delta) in enumerate(metrics_row2):
+        with cols2[i]:
+            val_display = f"S${val:,.0f}/sqm" if "单价" in label and isinstance(val, (int, float)) else fmt_price(val)
+            if isinstance(val, float):
+                st.metric(label, fmt_price(val) if "总" in label or "套" in label else f"S${val:,.0f}/sqm", delta=delta)
+            else:
+                st.metric(label, f"{val:,}" if isinstance(val, int) else fmt_price(val), delta=delta)
 
     for i, (label, val, delta) in enumerate(metrics):
         with cols[i]:
