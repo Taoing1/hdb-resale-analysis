@@ -15,21 +15,24 @@ TARGET_TOWNS = ["PUNGGOL", "SENGKANG", "HOUGANG"]
 @st.cache_data(ttl=86400)
 def fetch_hdb_data(force_refresh: bool = False) -> pd.DataFrame:
     """Fetch HDB resale data from data.gov.sg API, with local parquet cache."""
-    if not force_refresh and os.path.exists(CACHE_FILE):
-        return pd.read_parquet(CACHE_FILE)
+    # Always try local cache first (even on force_refresh, use as fallback)
+    cached = None
+    if os.path.exists(CACHE_FILE):
+        cached = pd.read_parquet(CACHE_FILE)
+        if not force_refresh:
+            return cached
 
+    # Attempt API fetch
     records = []
     offset = 0
-    progress = st.progress(0, "Fetching HDB data from data.gov.sg…")
-
-    while True:
-        params = {
-            "resource_id": RESOURCE_ID,
-            "limit": 500,
-            "offset": offset,
-            "sort": "month desc",
-        }
-        try:
+    try:
+        while True:
+            params = {
+                "resource_id": RESOURCE_ID,
+                "limit": 500,
+                "offset": offset,
+                "sort": "month desc",
+            }
             resp = requests.get(API_URL, params=params, timeout=60)
             resp.raise_for_status()
             data = resp.json()
@@ -38,17 +41,21 @@ def fetch_hdb_data(force_refresh: bool = False) -> pd.DataFrame:
                 break
             records.extend(batch)
             offset += len(batch)
-            progress.progress(min(offset / 50000, 1.0), f"Fetched {offset} records…")
             if len(batch) < 500:
                 break
-        except Exception as e:
-            st.warning(f"API error at offset {offset}: {e}")
-            break
+    except Exception as e:
+        st.warning(f"API unavailable ({e}), using cached data instead.")
 
-    progress.empty()
-    df = pd.DataFrame(records)
-    df.to_parquet(CACHE_FILE, index=False)
-    return df
+    if records:
+        df = pd.DataFrame(records)
+        df.to_parquet(CACHE_FILE, index=False)
+        return df
+
+    if cached is not None:
+        return cached
+
+    st.error("No data available. Please check network and try again.")
+    return pd.DataFrame()
 
 
 def clean_hdb_data(df: pd.DataFrame) -> pd.DataFrame:
