@@ -12,27 +12,20 @@ CACHE_FILE = os.path.join(os.path.dirname(__file__), "hdb_cache.parquet")
 TARGET_TOWNS = ["PUNGGOL", "SENGKANG", "HOUGANG"]
 
 
-@st.cache_data(ttl=86400)
-def fetch_hdb_data(force_refresh: bool = False) -> pd.DataFrame:
-    """Fetch HDB resale data from data.gov.sg API, with local parquet cache."""
-    # Always try local cache first (even on force_refresh, use as fallback)
-    cached = None
-    if os.path.exists(CACHE_FILE):
-        cached = pd.read_parquet(CACHE_FILE)
-        if not force_refresh:
-            return cached
-
-    # Attempt API fetch
+def _fetch_town(town: str) -> list:
+    """Fetch all records for a single town via paginated API calls."""
+    import json
     records = []
     offset = 0
-    try:
-        while True:
-            params = {
-                "resource_id": RESOURCE_ID,
-                "limit": 500,
-                "offset": offset,
-                "sort": "month desc",
-            }
+    while True:
+        params = {
+            "resource_id": RESOURCE_ID,
+            "limit": 500,
+            "offset": offset,
+            "filters": json.dumps({"town": town}),
+            "sort": "month desc",
+        }
+        try:
             resp = requests.get(API_URL, params=params, timeout=60)
             resp.raise_for_status()
             data = resp.json()
@@ -43,11 +36,33 @@ def fetch_hdb_data(force_refresh: bool = False) -> pd.DataFrame:
             offset += len(batch)
             if len(batch) < 500:
                 break
+        except Exception as e:
+            st.warning(f"API error for {town} at offset {offset}: {e}")
+            break
+    return records
+
+
+@st.cache_data(ttl=86400)
+def fetch_hdb_data(force_refresh: bool = False) -> pd.DataFrame:
+    """Fetch HDB resale data per-town to avoid CKAN global pagination limits."""
+    cached = None
+    if os.path.exists(CACHE_FILE):
+        cached = pd.read_parquet(CACHE_FILE)
+        if not force_refresh:
+            return cached
+
+    all_records = []
+    try:
+        for town in TARGET_TOWNS:
+            st.caption(f"Fetching {town} data…")
+            town_records = _fetch_town(town)
+            all_records.extend(town_records)
+            st.caption(f"  {town}: {len(town_records)} records")
     except Exception as e:
         st.warning(f"API unavailable ({e}), using cached data instead.")
 
-    if records:
-        df = pd.DataFrame(records)
+    if all_records:
+        df = pd.DataFrame(all_records)
         df.to_parquet(CACHE_FILE, index=False)
         return df
 
