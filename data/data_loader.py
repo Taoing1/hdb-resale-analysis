@@ -42,9 +42,19 @@ def _fetch_town(town: str) -> list:
     return records
 
 
+def _cache_version() -> float:
+    """Return cache file modification time as version key for invalidation."""
+    if os.path.exists(CACHE_FILE):
+        return os.path.getmtime(CACHE_FILE)
+    return 0.0
+
+
 @st.cache_data(ttl=86400)
-def fetch_hdb_data(force_refresh: bool = False) -> pd.DataFrame:
+def fetch_hdb_data(force_refresh: bool = False, _version: float = None) -> pd.DataFrame:
     """Fetch HDB resale data per-town to avoid CKAN global pagination limits."""
+    if _version is None:
+        _version = _cache_version()
+
     cached = None
     if os.path.exists(CACHE_FILE):
         cached = pd.read_parquet(CACHE_FILE)
@@ -152,5 +162,6 @@ def clean_hdb_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_data(force_refresh: bool = False) -> pd.DataFrame:
     """Full pipeline: fetch → clean → return."""
-    raw = fetch_hdb_data(force_refresh)
+    version = _cache_version()
+    raw = fetch_hdb_data(force_refresh, _version=version)
     return clean_hdb_data(raw)
