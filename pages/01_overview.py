@@ -251,18 +251,12 @@ def _render_stats_dashboard(df: pd.DataFrame, filtered: pd.DataFrame):
     ]
     for i, (label, val, delta) in enumerate(metrics_row2):
         with cols2[i]:
-            val_display = f"S${val:,.0f}/sqm" if "单价" in label and isinstance(val, (int, float)) else fmt_price(val)
-            if isinstance(val, float):
-                st.metric(label, fmt_price(val) if "总" in label or "套" in label else f"S${val:,.0f}/sqm", delta=delta)
-            else:
-                st.metric(label, f"{val:,}" if isinstance(val, int) else fmt_price(val), delta=delta)
-
-    for i, (label, val, delta) in enumerate(metrics):
-        with cols[i]:
-            if isinstance(val, float):
+            if "单价" in label:
+                st.metric(label, f"S${val:,.0f}/sqm", delta=delta)
+            elif isinstance(val, float):
                 st.metric(label, fmt_price(val), delta=delta)
             else:
-                st.metric(label, f"{val:,}" if isinstance(val, int) else fmt_price(val), delta=delta)
+                st.metric(label, f"{val:,}", delta=delta)
 
     # ---- Row 2: Per-Town Breakdown ----
     st.caption("镇区分组统计")
