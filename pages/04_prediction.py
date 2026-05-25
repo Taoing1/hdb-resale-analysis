@@ -381,7 +381,7 @@ def run(df: pd.DataFrame):
             u_area = st.number_input("面积 (sqm)", 30.0, 250.0, 90.0, 1.0, key="pred_area")
         with c2:
             u_lease = st.number_input("剩余租约年限", 0.0, 99.0, 70.0, 1.0, key="pred_lease")
-            u_commence = st.number_input("建成年份", 1960, 2030, int(current_year - u_lease), key="pred_commence")
+            u_commence = st.number_input("建成年份", 1960, 2030, max(1960, int(current_year - u_lease)), key="pred_commence")
             u_age = current_year - u_commence
             st.caption(f"→ 房龄约 {u_age} 年")
         with c3:
