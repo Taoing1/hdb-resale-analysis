@@ -222,29 +222,26 @@ def _render_stats_dashboard(df: pd.DataFrame, filtered: pd.DataFrame):
     all_avg_psm = df["price_per_sqm"].mean()
     cols = st.columns(5)
     metrics_row1 = [
-        ("筛选后成交套数", len(filtered), f"{len(filtered)/len(df)*100:.1f}% 占比" if len(df) > 0 else None),
-        ("平均单价 (SGD/sqm)", f"S${avg_psm:,.0f}", _delta_str(all_avg_psm, avg_psm)),
-        ("平均总价 (SGD)", fmt_price(filtered["resale_price"].mean()), _delta_str(df["resale_price"].mean(), filtered["resale_price"].mean())),
-        ("最高单价 (SGD/sqm)", f"S${filtered['price_per_sqm'].max():,.0f}", None),
-        ("最低单价 (SGD/sqm)", f"S${filtered['price_per_sqm'].min():,.0f}", None),
+        ("成交套数", f"{len(filtered):,}", None),
+        ("平均单价", f"S${avg_psm:,.0f}", _delta_str(all_avg_psm, avg_psm)),
+        ("平均总价", fmt_price(filtered["resale_price"].mean()), _delta_str(df["resale_price"].mean(), filtered["resale_price"].mean())),
+        ("最高单价", f"S${filtered['price_per_sqm'].max():,.0f}", None),
+        ("最低单价", f"S${filtered['price_per_sqm'].min():,.0f}", None),
     ]
     for i, (label, val, delta) in enumerate(metrics_row1):
         with cols[i]:
             st.metric(label, val, delta=delta)
 
     # ---- Row 2: Supplementary KPIs ----
-    cols2 = st.columns(4)
+    cols2 = st.columns(3)
     metrics_row2 = [
-        ("中位总价", filtered["resale_price"].median(), _delta_str(df["resale_price"].median(), filtered["resale_price"].median())),
-        ("最高总价", filtered["resale_price"].max(), None),
-        ("总成交额", filtered["resale_price"].sum(), None),
+        ("中位总价", fmt_price(filtered["resale_price"].median()), _delta_str(df["resale_price"].median(), filtered["resale_price"].median())),
+        ("最高总价", fmt_price(filtered["resale_price"].max()), None),
+        ("总成交额", fmt_price(filtered["resale_price"].sum()), None),
     ]
     for i, (label, val, delta) in enumerate(metrics_row2):
         with cols2[i]:
-            if isinstance(val, float):
-                st.metric(label, fmt_price(val), delta=delta)
-            else:
-                st.metric(label, f"{val:,}" if isinstance(val, int) else fmt_price(val), delta=delta)
+            st.metric(label, val, delta=delta)
 
     # ---- Row 2: Per-Town Breakdown ----
     st.caption("镇区分组统计")
