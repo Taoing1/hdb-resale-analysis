@@ -1,286 +1,459 @@
-"""Page 4: Price Prediction — Linear Regression + Random Forest, cross-validation, residuals, feature importance, interactive prediction."""
+"""Page 4: Price Prediction — time-split, feature engineering, per-segment evaluation, interactive estimator."""
+
+from math import radians, sin, cos, sqrt, atan2
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import Ridge
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
 
-from utils.helpers import fmt_price, get_model_metrics
+from utils.helpers import TOWN_COORDS, fmt_price
 
+# ---- Hardcoded reference data ----
+MRT_COORDS = {
+    "PUNGGOL":  [(1.4052, 103.9022)],
+    "SENGKANG": [(1.3924, 103.8951)],
+    "HOUGANG":  [(1.3716, 103.8923)],
+}
+
+SCHOOLS_BY_TOWN = {
+    "PUNGGOL":  ["Punggol Green Primary", "Mee Toh School", "Punggol Secondary"],
+    "SENGKANG": ["Sengkang Green Primary", "Sengkang Secondary", "Nan Chiau High"],
+    "HOUGANG":  ["Hougang Primary", "Hougang Secondary", "Xinmin Secondary"],
+}
+
+FLAT_TYPE_ORDINAL = {
+    "2-Room": 1, "3-Room": 2, "4-Room": 3,
+    "5-Room": 4, "Executive": 5, "Multi-Gen": 6,
+}
+
+
+# ====================== HELPERS ======================
+
+def _haversine(lat1, lng1, lat2, lng2):
+    """Return distance in km between two lat/lng pairs."""
+    R = 6371
+    dlat = radians(lat2 - lat1)
+    dlng = radians(lng2 - lng1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng / 2) ** 2
+    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def _nearest_mrt_dist(town: str) -> float:
+    """Approximate distance from town centre to nearest MRT station (km)."""
+    if town not in TOWN_COORDS:
+        return 2.0
+    t_lat, t_lng = TOWN_COORDS[town]
+    mrt_list = MRT_COORDS.get(town, [(t_lat + 0.01, t_lng + 0.01)])
+    return min(_haversine(t_lat, t_lng, mlat, mlng) for mlat, mlng in mrt_list)
+
+
+def _mape(y_true, y_pred):
+    """Mean Absolute Percentage Error (%)."""
+    y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
+    mask = y_true != 0
+    if mask.sum() == 0:
+        return 0.0
+    return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
+
+
+# ====================== MAIN ======================
 
 def run(df: pd.DataFrame):
-    st.title("🤖 价格预测模型")
-    st.markdown("Linear Regression + Random Forest — 交叉验证、残差诊断、特征重要性、交互式预测。")
+    st.title("🤖 房价预测模型")
+    st.markdown("特征工程 → 时间切分训练 → 分房型评估 → 交互式预估。")
 
-    # ---- Prepare Data ----
-    feature_cols = ["town", "flat_type", "floor_area_sqm", "remaining_lease", "storey_mid", "year"]
-    model_df = df.dropna(subset=feature_cols + ["resale_price"]).copy()
+    # ---- 4.1 Feature Engineering ----
+    df = df.copy()
+    current_year = pd.Timestamp.now().year
+    df["floor_age"] = df["lease_commence_date"].apply(
+        lambda x: current_year - x if pd.notna(x) else None
+    )
+    df["flat_type_ordinal"] = df["flat_type"].map(FLAT_TYPE_ORDINAL).fillna(0).astype(int)
+    df["mrt_dist_km"] = df["town"].apply(_nearest_mrt_dist)
+    df["school_count"] = df["town"].apply(lambda t: len(SCHOOLS_BY_TOWN.get(t, [])))
+    df["mature_flag"] = 0  # Punggol / Sengkang / Hougang are all non-mature
 
+    feature_cols = [
+        "floor_area_sqm", "remaining_lease", "floor_age", "storey_mid",
+        "flat_type_ordinal", "mrt_dist_km", "school_count", "mature_flag",
+        "town", "year",
+    ]
+    target_col = "price_per_sqm"
+
+    model_df = df.dropna(subset=feature_cols + [target_col]).copy()
+
+    with st.expander("📋 特征工程概览", expanded=False):
+        st.markdown(f"""
+        | 特征 | 处理方式 | 说明 |
+        |------|---------|------|
+        | 面积 | StandardScaler | `floor_area_sqm` |
+        | 剩余租约年限 | StandardScaler | `remaining_lease` 数值 |
+        | 房龄 | StandardScaler | {current_year} − `lease_commence_date` |
+        | 楼层 | StandardScaler | `storey_mid` 中位值 |
+        | 房型 | StandardScaler (序数编码) | 2-Room=1, 3-Room=2, 4-Room=3, 5-Room=4, Executive=5, Multi-Gen=6 |
+        | MRT 特征 | StandardScaler | 镇区中心到最近 MRT 站距离 (km) |
+        | 学校特征 | StandardScaler | 镇区内学校数量 |
+        | 成熟区标志 | Passthrough | 当前三镇区均为非成熟区=0 |
+        | 镇区 | OneHotEncoder | Punggol / Sengkang / Hougang |
+        | 成交年份 | StandardScaler | 从 `month` 提取 |
+        """)
+        st.caption(f"预测目标: **单价 (新元/sqm)** | 有效样本: **{len(model_df):,}** 条")
+
+    # ---- 4.2 Train / Test Split (time-based) ----
     X = model_df[feature_cols]
-    y = model_df["resale_price"]
+    y = model_df[target_col]
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test = X[X["year"] <= 2023].copy(), X[X["year"] >= 2024].copy()
+    y_train, y_test = y.loc[X_train.index], y.loc[X_test.index]
 
-    numeric_cols = ["floor_area_sqm", "remaining_lease", "storey_mid", "year"]
-    categorical_cols = ["town", "flat_type"]
+    if len(X_train) < 100 or len(X_test) < 30:
+        st.error(f"数据不足: 训练集 {len(X_train)} 条, 测试集 {len(X_test)} 条")
+        return
+
+    st.markdown(f"**时间切分**: 训练集 (2020–2023) **{len(X_train):,}** 条 | 测试集 (2024+) **{len(X_test):,}** 条")
+
+    # ---- Preprocessor ----
+    numeric_cols = [
+        "floor_area_sqm", "remaining_lease", "floor_age", "storey_mid",
+        "flat_type_ordinal", "mrt_dist_km", "school_count", "mature_flag", "year",
+    ]
+    categorical_cols = ["town"]
 
     preprocessor = ColumnTransformer([
         ("num", StandardScaler(), numeric_cols),
         ("cat", OneHotEncoder(drop="first", handle_unknown="ignore"), categorical_cols),
     ])
 
-    # ---- Train Models ----
-    @st.cache_resource
-    def train_models(_X_train, _y_train, _X_test, _y_test):
+    # ---- Sidebar: Model Selection + Hyperparameters ----
+    st.sidebar.subheader("🤖 模型设置")
+
+    use_lr = st.sidebar.checkbox("Linear Regression", value=False, key="use_lr")
+    use_ridge = st.sidebar.checkbox("Ridge Regression", value=True, key="use_ridge")
+    use_rf = st.sidebar.checkbox("Random Forest", value=True, key="use_rf")
+    use_gb = st.sidebar.checkbox("Gradient Boosting", value=False, key="use_gb")
+
+    params = {}
+    if use_ridge:
+        params["ridge_alpha"] = st.sidebar.slider("Ridge alpha", 0.01, 10.0, 1.0, 0.01, key="ridge_alpha")
+    if use_rf:
+        params["rf_n"] = st.sidebar.slider("RF n_estimators", 50, 500, 250, 50, key="rf_n")
+        params["rf_depth"] = st.sidebar.slider("RF max_depth", 5, 30, 18, key="rf_depth")
+    if use_gb:
+        params["gb_n"] = st.sidebar.slider("GB n_estimators", 50, 500, 200, 50, key="gb_n")
+        params["gb_lr"] = st.sidebar.slider("GB learning_rate", 0.01, 0.50, 0.10, 0.01, key="gb_lr")
+        params["gb_depth"] = st.sidebar.slider("GB max_depth", 3, 15, 6, key="gb_depth")
+
+    # ---- Fit preprocessor ----
+    prep = preprocessor.fit(X_train)
+
+    def _train_models():
         models = {}
+        X_tr = prep.transform(X_train)
+        X_te = prep.transform(X_test)
 
-        lr = Pipeline([("prep", preprocessor), ("model", Ridge(alpha=1.0))])
-        lr.fit(_X_train, _y_train)
-        models["Ridge Regression"] = {"pipeline": lr, "pred": lr.predict(_X_test)}
+        if use_lr:
+            m = LinearRegression()
+            m.fit(X_tr, y_train)
+            models["Linear Regression"] = {"pipeline": m, "pred": m.predict(X_te)}
 
-        rf = Pipeline([
-            ("prep", preprocessor),
-            ("model", RandomForestRegressor(n_estimators=250, max_depth=18,
-                                            min_samples_leaf=5, random_state=42, n_jobs=-1))
-        ])
-        rf.fit(_X_train, _y_train)
-        models["Random Forest"] = {"pipeline": rf, "pred": rf.predict(_X_test)}
+        if use_ridge:
+            m = Ridge(alpha=params.get("ridge_alpha", 1.0))
+            m.fit(X_tr, y_train)
+            models["Ridge Regression"] = {"pipeline": m, "pred": m.predict(X_te)}
+
+        if use_rf:
+            m = RandomForestRegressor(
+                n_estimators=params.get("rf_n", 250),
+                max_depth=params.get("rf_depth", 18),
+                min_samples_leaf=5, random_state=42, n_jobs=-1,
+            )
+            m.fit(X_tr, y_train)
+            models["Random Forest"] = {"pipeline": m, "pred": m.predict(X_te)}
+
+        if use_gb:
+            m = GradientBoostingRegressor(
+                n_estimators=params.get("gb_n", 200),
+                learning_rate=params.get("gb_lr", 0.1),
+                max_depth=params.get("gb_depth", 6),
+                min_samples_leaf=5, random_state=42,
+            )
+            m.fit(X_tr, y_train)
+            models["Gradient Boosting"] = {"pipeline": m, "pred": m.predict(X_te)}
 
         return models
 
+    if not any([use_lr, use_ridge, use_rf, use_gb]):
+        st.warning("请在侧边栏至少选择一个模型。")
+        return
+
     with st.spinner("训练模型中…"):
-        models = train_models(X_train, y_train, X_test, y_test)
+        models = _train_models()
 
-    # ==================== MODEL EVALUATION ====================
+    # ==================== 4.3 PER-SEGMENT EVALUATION ====================
 
-    st.header("📐 模型评估")
+    st.header("📊 分房型预测对比")
 
-    metrics_data = []
-    for name, m in models.items():
-        m_metrics = get_model_metrics(y_test, m["pred"])
-        m_metrics["Model"] = name
-        metrics_data.append(m_metrics)
+    segments = {
+        "小户型 (≤3-Room)":     X_test["flat_type_ordinal"] <= 2,
+        "中户型 (4-Room)":       X_test["flat_type_ordinal"] == 3,
+        "大户型 (≥5-Room/Exec)": X_test["flat_type_ordinal"] >= 4,
+        "老旧组屋 (租约<60年)":   X_test["remaining_lease"] < 60,
+        "新近组屋 (租约≥80年)":   X_test["remaining_lease"] >= 80,
+        "MRT沿线 (<500m)":       X_test["mrt_dist_km"] < 0.5,
+    }
 
-    metrics_df = pd.DataFrame(metrics_data)
+    all_seg_rows = []
+    for seg_name, seg_mask in segments.items():
+        n_seg = seg_mask.sum()
+        if n_seg < 5:
+            continue
+        y_seg = y_test[seg_mask]
+        for model_name, m in models.items():
+            pred_seg = m["pred"][seg_mask.values]
+            mae = float(np.mean(np.abs(y_seg - pred_seg)))
+            mape_val = _mape(y_seg.values, pred_seg)
+            r2_val = float(1 - np.sum((y_seg - pred_seg) ** 2) / np.sum((y_seg - y_seg.mean()) ** 2)) if y_seg.std() > 0 else 0
+            all_seg_rows.append({
+                "房源类型": seg_name, "模型": model_name,
+                "样本数": n_seg, "MAE": mae, "MAPE(%)": mape_val, "R²": r2_val,
+            })
 
-    # KPI cards
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        for _, row in metrics_df.iterrows():
-            st.metric(f"MAE — {row['Model']}", f"S${row['MAE']:,.0f}")
-    with c2:
-        for _, row in metrics_df.iterrows():
-            st.metric(f"RMSE — {row['Model']}", f"S${row['RMSE']:,.0f}")
-    with c3:
-        for _, row in metrics_df.iterrows():
-            st.metric(f"R² — {row['Model']}", f"{row['R²']:.4f}")
+    if all_seg_rows:
+        seg_df = pd.DataFrame(all_seg_rows)
+        st.dataframe(
+            seg_df.style.format({
+                "MAE": "S${:,.0f}", "MAPE(%)": "{:.1f}%", "R²": "{:.4f}",
+            }),
+            width='stretch', hide_index=True,
+        )
+
+        # Highlight large-error segments
+        high_err = seg_df[seg_df["MAPE(%)"] > seg_df["MAPE(%)"].quantile(0.75)]
+        if len(high_err) > 0:
+            st.caption(
+                "误差较大的类别可能因该类房型定价更复杂（如老旧组屋受翻新状态影响）"
+                "或样本量偏小导致模型泛化不足。"
+            )
+
+    # ==================== 4.4 OVERALL EVALUATION ====================
+
+    st.header("📐 整体评估")
+
+    # ---- Metrics cards ----
+    cols = st.columns(len(models))
+    for i, (name, m) in enumerate(models.items()):
+        mae = float(np.mean(np.abs(y_test - m["pred"])))
+        rmse = float(np.sqrt(np.mean((y_test - m["pred"]) ** 2)))
+        r2 = float(1 - np.sum((y_test - m["pred"]) ** 2) / np.sum((y_test - y_test.mean()) ** 2))
+        with cols[i]:
+            st.metric(f"MAE — {name}", f"S${mae:,.0f}/sqm")
+            st.metric(f"RMSE — {name}", f"S${rmse:,.0f}/sqm")
+            st.metric(f"R² — {name}", f"{r2:.4f}")
+            st.metric(f"MAPE — {name}", f"{_mape(y_test.values, m['pred']):.1f}%")
 
     # ---- Cross-Validation ----
-    with st.expander("🔍 交叉验证 (5-fold CV)", expanded=False):
-        cv_results = {}
+    with st.expander("🔍 交叉验证 (5-fold CV, 训练集)", expanded=False):
+        X_tr = prep.transform(X_train)
         for name, m in models.items():
-            # CV on training set
             pipe = m["pipeline"]
-            cv_mae = -cross_val_score(pipe, X_train, y_train, cv=5,
-                                       scoring="neg_mean_absolute_error")
-            cv_r2 = cross_val_score(pipe, X_train, y_train, cv=5, scoring="r2")
-            cv_results[name] = {"MAE_mean": cv_mae.mean(), "MAE_std": cv_mae.std(),
-                                "R2_mean": cv_r2.mean(), "R2_std": cv_r2.std()}
+            cv_mae = -cross_val_score(pipe, X_tr, y_train, cv=5, scoring="neg_mean_absolute_error")
+            cv_r2 = cross_val_score(pipe, X_tr, y_train, cv=5, scoring="r2")
             st.caption(
-                f"{name}: CV MAE = S${cv_mae.mean():,.0f} ± S${cv_mae.std():,.0f}, "
+                f"{name}: CV MAE = S${cv_mae.mean():,.0f} ± S${cv_mae.std():,.0f}/sqm, "
                 f"CV R² = {cv_r2.mean():.4f} ± {cv_r2.std():.4f}"
             )
 
-    # ---- Model Comparison Chart ----
-    st.subheader("模型指标对比")
-    fig_bar = go.Figure()
-    fig_bar.add_trace(go.Bar(name="MAE", x=metrics_df["Model"], y=metrics_df["MAE"],
-                              text=[f"S${v:,.0f}" for v in metrics_df["MAE"]],
-                              textposition="outside", marker_color="#FF6B6B"))
-    fig_bar.add_trace(go.Bar(name="RMSE", x=metrics_df["Model"], y=metrics_df["RMSE"],
-                              text=[f"S${v:,.0f}" for v in metrics_df["RMSE"]],
-                              textposition="outside", marker_color="#4ECDC4"))
-    fig_bar.update_layout(
-        title="MAE & RMSE 对比 (越低越好)", height=380,
-        margin=dict(l=0, r=0, t=30, b=0), barmode="group",
-    )
-    st.plotly_chart(fig_bar, width='stretch')
-
-    # ---- Actual vs Predicted ----
+    # ---- Predicted vs Actual (colored by flat_type) ----
     st.subheader("预测值 vs 实际值")
-    c1, c2 = st.columns(2)
-    for i, (name, m) in enumerate(models.items()):
-        col = [c1, c2][i]
-        with col:
-            err = y_test - m["pred"]
-            err_pct = (err / y_test * 100).abs()
-            fig = px.scatter(
-                x=y_test, y=m["pred"], opacity=0.45,
-                color=err_pct, color_continuous_scale="Reds",
-                title=f"{name} (误差率着色)",
-                labels={"x": "实际价格 (新元)", "y": "预测价格 (新元)", "color": "|误差%|"},
-            )
-            fig.add_scatter(
-                x=[y_test.min(), y_test.max()], y=[y_test.min(), y_test.max()],
-                mode="lines", name="完美", line=dict(dash="dash", color="gray"),
-            )
-            fig.update_layout(height=380, margin=dict(l=0, r=0, t=30, b=0))
-            st.plotly_chart(fig, width='stretch')
+    for name, m in models.items():
+        plot_df = pd.DataFrame({
+            "实际单价 (新元/sqm)": y_test.values,
+            "预测单价 (新元/sqm)": m["pred"],
+            "房型": X_test["flat_type"].values,
+            "误差率 (%)": np.abs(y_test.values - m["pred"]) / y_test.values * 100,
+        })
+        fig = px.scatter(
+            plot_df, x="实际单价 (新元/sqm)", y="预测单价 (新元/sqm)",
+            color="房型",
+            title=f"{name} — 预测 vs 实际 (按房型着色)",
+            opacity=0.55,
+        )
+        fig.add_scatter(
+            x=[y_test.min(), y_test.max()],
+            y=[y_test.min(), y_test.max()],
+            mode="lines", name="完美预测", line=dict(dash="dash", color="gray"),
+        )
+        fig.update_layout(height=420, margin=dict(l=0, r=0, t=30, b=0))
+        st.plotly_chart(fig, width='stretch')
 
     # ---- Residual Analysis ----
     with st.expander("📉 残差诊断", expanded=False):
-        c1, c2 = st.columns(2)
-        for i, (name, m) in enumerate(models.items()):
-            col = [c1, c2][i]
-            residuals = y_test - m["pred"]
-            with col:
-                # Residual histogram
+        for name, m in models.items():
+            residuals = y_test.values - m["pred"]
+            c1, c2 = st.columns(2)
+            with c1:
                 fig1 = px.histogram(
                     residuals, nbins=50, title=f"{name} 残差分布",
-                    labels={"value": "残差 (新元)", "count": "频数"},
+                    labels={"value": "残差 (新元/sqm)", "count": "频数"},
                 )
-                fig1.update_layout(height=280, margin=dict(l=0, r=0, t=30, b=0))
+                fig1.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0))
                 st.plotly_chart(fig1, width='stretch')
-
-                # Residual vs fitted
+            with c2:
                 fig2 = px.scatter(
                     x=m["pred"], y=residuals, opacity=0.4,
                     title=f"{name} 残差 vs 预测值",
-                    labels={"x": "预测价格 (新元)", "y": "残差 (新元)"},
+                    labels={"x": "预测单价 (新元/sqm)", "y": "残差 (新元/sqm)"},
                 )
                 fig2.add_hline(y=0, line_dash="dash", line_color="red")
-                fig2.update_layout(height=280, margin=dict(l=0, r=0, t=30, b=0))
+                fig2.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0))
                 st.plotly_chart(fig2, width='stretch')
 
-    # ==================== FEATURE IMPORTANCE ====================
-
+    # ---- Feature Importance ----
     st.header("⭐ 特征重要性")
 
-    rf_pipeline = models["Random Forest"]["pipeline"]
-    rf_model = rf_pipeline.named_steps["model"]
-    prep = rf_pipeline.named_steps["prep"]
+    if "Random Forest" in models:
+        rf_model = models["Random Forest"]["pipeline"]
+        cat_features = list(prep.named_transformers_["cat"].get_feature_names_out(categorical_cols))
+        all_features = numeric_cols + cat_features
 
-    cat_features = list(prep.named_transformers_["cat"].get_feature_names_out(categorical_cols))
-    all_features = numeric_cols + cat_features
-    importances = rf_model.feature_importances_
+        importances = rf_model.feature_importances_
+        # Aggregate OneHot back to original features
+        agg_imp = {}
+        for col in numeric_cols:
+            idx = all_features.index(col)
+            agg_imp[col] = float(importances[idx])
+        for col in categorical_cols:
+            col_indices = [i for i, f in enumerate(cat_features) if f.startswith(f"{col}_")]
+            agg_imp[col] = float(sum(importances[[all_features.index(cat_features[i]) for i in col_indices]]))
 
-    # Aggregate back to original categorical features
-    agg_importance = {}
-    agg_importance["floor_area_sqm"] = importances[all_features.index("floor_area_sqm")]
-    agg_importance["remaining_lease"] = importances[all_features.index("remaining_lease")]
-    agg_importance["storey_mid"] = importances[all_features.index("storey_mid")]
-    agg_importance["year"] = importances[all_features.index("year")]
-    for col in categorical_cols:
-        col_idx = [i for i, f in enumerate(cat_features) if f.startswith(f"{col}_")]
-        agg_importance[col] = importances[[all_features.index(cat_features[i]) for i in col_idx]].sum()
+        imp_df = pd.DataFrame({
+            "特征": list(agg_imp.keys()), "重要性": list(agg_imp.values()),
+        }).sort_values("重要性", ascending=True)
 
-    imp_df = pd.DataFrame({
-        "feature": list(agg_importance.keys()),
-        "importance": list(agg_importance.values()),
-    }).sort_values("importance", ascending=True)
-
-    c1, c2 = st.columns([2, 1])
-    with c1:
         fig_imp = px.bar(
-            imp_df, x="importance", y="feature", orientation="h",
+            imp_df, x="重要性", y="特征", orientation="h",
             title="Random Forest 特征重要性 (聚合)",
-            labels={"importance": "重要性", "feature": "特征"},
-            text=imp_df["importance"].apply(lambda x: f"{x:.4f}"),
+            text=imp_df["重要性"].apply(lambda x: f"{x:.4f}"),
         )
-        fig_imp.update_layout(height=380, margin=dict(l=0, r=0, t=30, b=0))
+        fig_imp.update_layout(height=400, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig_imp, width='stretch')
 
-    with c2:
-        # LR coefficients (standardized)
-        lr_pipeline = models["Ridge Regression"]["pipeline"]
-        lr_model = lr_pipeline.named_steps["model"]
-        coefs = lr_model.coef_
-        lr_importance = pd.DataFrame({
-            "feature": ["floor_area_sqm", "remaining_lease", "storey_mid", "year"] + cat_features,
-            "coefficient": np.abs(coefs),
-        }).sort_values("coefficient", ascending=True).tail(15)
-        fig_lr = px.bar(
-            lr_importance, x="coefficient", y="feature", orientation="h",
+    # Ridge / Linear coefficients
+    linear_model = None
+    if "Ridge Regression" in models:
+        linear_model = models["Ridge Regression"]["pipeline"]
+    elif "Linear Regression" in models:
+        linear_model = models["Linear Regression"]["pipeline"]
+
+    if linear_model is not None and hasattr(linear_model, "coef_"):
+        cat_features = list(prep.named_transformers_["cat"].get_feature_names_out(categorical_cols))
+        all_features = numeric_cols + cat_features
+        coefs = linear_model.coef_
+        coef_df = pd.DataFrame({
+            "特征": all_features, "|系数|": np.abs(coefs),
+        }).sort_values("|系数|", ascending=True).tail(15)
+        fig_coef = px.bar(
+            coef_df, x="|系数|", y="特征", orientation="h",
             title="Ridge |系数| (标准化后)",
-            labels={"coefficient": "|系数|", "feature": "特征"},
+            labels={"|系数|": "|系数|", "特征": "特征"},
         )
-        fig_lr.update_layout(height=380, margin=dict(l=0, r=0, t=30, b=0))
-        st.plotly_chart(fig_lr, width='stretch')
+        fig_coef.update_layout(height=400, margin=dict(l=0, r=0, t=30, b=0))
+        st.plotly_chart(fig_coef, width='stretch')
 
     # ==================== INTERACTIVE PREDICTION ====================
 
     st.divider()
-    st.header("🎯 自定义价格预测")
+    st.header("🎯 房价预估器")
 
     with st.form("prediction_form"):
-        st.markdown("输入房产属性，模型实时预测转售价格。")
+        st.markdown("输入房产属性，模型实时预估单价与总价。")
 
         c1, c2, c3 = st.columns(3)
         with c1:
             u_town = st.selectbox("镇区", sorted(df["town"].unique()), key="pred_town")
             u_type = st.selectbox("房型", sorted(df["flat_type"].unique()), key="pred_type")
-        with c2:
             u_area = st.number_input("面积 (sqm)", 30.0, 250.0, 90.0, 1.0, key="pred_area")
-            u_storey = st.slider("楼层 (中位)", 1, 50, 10, key="pred_storey")
+        with c2:
+            u_lease = st.number_input("剩余租约年限", 0.0, 99.0, 70.0, 1.0, key="pred_lease")
+            u_commence = st.number_input("建成年份", 1960, 2030, int(current_year - u_lease), key="pred_commence")
+            u_age = current_year - u_commence
+            st.caption(f"→ 房龄约 {u_age} 年")
         with c3:
-            u_lease = st.number_input("剩余年限 (年)", 0.0, 99.0, 70.0, 1.0, key="pred_lease")
-            u_year = st.number_input("交易年份", 2020, 2030, 2025, key="pred_year")
+            u_storey = st.slider("楼层 (中位)", 1, 50, 10, key="pred_storey")
+            u_year = st.number_input("交易年份", 2020, 2030, current_year, key="pred_year")
 
         _, col_btn, _ = st.columns([2, 1, 2])
         with col_btn:
-            submitted = st.form_submit_button("💰 预测价格", width='stretch')
+            submitted = st.form_submit_button("💰 预测价格", use_container_width=True)
 
     if submitted:
+        u_type_ord = FLAT_TYPE_ORDINAL.get(u_type, 0)
+        u_mrt = _nearest_mrt_dist(u_town)
+        u_schools = len(SCHOOLS_BY_TOWN.get(u_town, []))
+
         input_data = pd.DataFrame([{
-            "town": u_town, "flat_type": u_type,
             "floor_area_sqm": u_area, "remaining_lease": u_lease,
-            "storey_mid": u_storey, "year": u_year,
+            "floor_age": u_age, "storey_mid": u_storey,
+            "flat_type_ordinal": u_type_ord, "mrt_dist_km": u_mrt,
+            "school_count": u_schools, "mature_flag": 0,
+            "town": u_town, "year": u_year,
         }])
+
+        input_tr = prep.transform(input_data)
 
         st.subheader("预测结果")
         results = {}
         cols = st.columns(len(models))
         for i, (name, m) in enumerate(models.items()):
-            pred = m["pipeline"].predict(input_data)[0]
-            psm = pred / u_area if u_area > 0 else 0
-            results[name] = pred
+            psm = float(m["pipeline"].predict(input_tr)[0])
+            total = psm * u_area
+            results[name] = psm
             with cols[i]:
                 st.metric(
-                    label=name,
-                    value=f"S${pred:,.0f}",
+                    label=f"{name}",
+                    value=f"S${total:,.0f}",
                     delta=f"S${psm:,.0f}/sqm",
                 )
 
-        # RF prediction interval using individual trees
-        rf_estimator = models["Random Forest"]["pipeline"].named_steps["model"]
-        prep_data = models["Random Forest"]["pipeline"].named_steps["prep"].transform(input_data)
-        tree_preds = np.array([tree.predict(prep_data)[0] for tree in rf_estimator.estimators_])
-        lower, upper = np.percentile(tree_preds, [5, 95])
-        st.caption(
-            f"RF 90% 预测区间: S${lower:,.0f} – S${upper:,.0f} "
-            f"(基于 {len(rf_estimator.estimators_)} 棵树的分布)"
-        )
+        # Prediction interval via RF individual trees
+        if "Random Forest" in models:
+            rf = models["Random Forest"]["pipeline"]
+            if hasattr(rf, "estimators_"):
+                tree_preds = np.array([t.predict(input_tr)[0] for t in rf.estimators_])
+                lo, hi = np.percentile(tree_preds, [5, 95])
+                st.caption(
+                    f"RF 90% 预测区间: S${lo:,.0f}/sqm – S${hi:,.0f}/sqm "
+                    f"(总价 S${lo*u_area:,.0f} – S${hi*u_area:,.0f})"
+                )
 
-        # Find similar actual transactions
-        st.subheader("📋 相似历史成交 (参考)")
+        # Similar transactions
+        st.subheader("📋 相似历史成交")
         similar = df[
             (df["flat_type"] == u_type)
             & (df["floor_area_sqm"].between(u_area - 10, u_area + 10))
-            & (df["remaining_lease"].between(u_lease - 5, u_lease + 5))
             & (df["town"] == u_town)
-        ].nsmallest(10, "month")
+        ]
+        if "remaining_lease" in similar.columns:
+            similar = similar[
+                similar["remaining_lease"].between(
+                    max(0, u_lease - 5), u_lease + 5
+                )
+            ]
+        similar = similar.nlargest(10, "month")
         if len(similar) > 0:
-            sim_display = similar[["month", "town", "flat_type", "floor_area_sqm",
-                                    "remaining_lease", "resale_price"]].copy()
-            sim_display["month"] = sim_display["month"].dt.strftime("%Y-%m")
-            sim_display["resale_price"] = sim_display["resale_price"].apply(fmt_price)
-            st.dataframe(sim_display, width='stretch', hide_index=True)
+            sim_disp = similar[[
+                "month", "town", "flat_type", "floor_area_sqm",
+                "remaining_lease", "resale_price", "price_per_sqm",
+            ]].copy()
+            sim_disp["month"] = sim_disp["month"].dt.strftime("%Y-%m")
+            for col in ["resale_price", "price_per_sqm"]:
+                sim_disp[col] = sim_disp[col].apply(lambda x: f"S${x:,.0f}")
+            st.dataframe(sim_disp, width='stretch', hide_index=True)
         else:
             st.caption("未找到足够相似的历史交易记录。")
