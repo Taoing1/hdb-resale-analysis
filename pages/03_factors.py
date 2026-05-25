@@ -305,6 +305,7 @@ def _analyze_town_type(df: pd.DataFrame):
         df["town_type"] = "非成熟区"
         combined = pd.concat([df, mature_df[df.columns.intersection(mature_df.columns)]], ignore_index=True)
     else:
+        df["town_type"] = "非成熟区"
         combined = df
         st.warning("成熟区数据暂不可用，仅展示当前镇区。")
 

@@ -388,7 +388,7 @@ def _q2_strategy_rationale(df: pd.DataFrame):
         budget_max = 450_000
         types = ["3-Room", "4-Room"]
         towns = ["PUNGGOL", "SENGKANG", "HOUGANG"]
-        extra_filter = lambda d: True
+        extra_filter = None
         name = "低总价入门"
 
     st.info(desc)
@@ -402,14 +402,16 @@ def _q2_strategy_rationale(df: pd.DataFrame):
         & (train["resale_price"] <= budget_max)
         & train["town"].isin(towns)
     ]
-    strat_train = strat_train[extra_filter(strat_train)]
+    if extra_filter is not None:
+        strat_train = strat_train[extra_filter(strat_train)]
 
     strat_test = test[
         test["flat_type"].isin(types)
         & (test["resale_price"] <= budget_max)
         & test["town"].isin(towns)
     ]
-    strat_test = strat_test[extra_filter(strat_test)]
+    if extra_filter is not None:
+        strat_test = strat_test[extra_filter(strat_test)]
 
     base_train = train[train["flat_type"].isin(types)]
     base_test = test[test["flat_type"].isin(types)]
