@@ -104,7 +104,7 @@ def _build_sidebar_filters(df: pd.DataFrame) -> dict:
         )
 
         # ---- Price Range ----
-        st.caption("价格范围 (SGD)")
+        st.caption("价格范围 (新元)")
         sel_price = st.slider(
             "价格",
             int(df["resale_price"].min() // 10_000 * 10_000),
@@ -217,26 +217,25 @@ def _render_stats_dashboard(df: pd.DataFrame, filtered: pd.DataFrame):
     """Dynamic statistics dashboard with metrics, deltas, and town breakdown."""
     st.subheader("📊 统计看板")
 
-    # ---- Row 1: Required 5 KPIs ----
+    # ---- Row 1: Required KPIs (3 cols, with deltas) ----
     avg_psm = filtered["price_per_sqm"].mean()
     all_avg_psm = df["price_per_sqm"].mean()
-    cols = st.columns(5)
+    cols = st.columns(3)
     metrics_row1 = [
         ("成交套数", f"{len(filtered):,}", None),
         ("平均单价", f"S${avg_psm:,.0f}", _delta_str(all_avg_psm, avg_psm)),
         ("平均总价", fmt_price(filtered["resale_price"].mean()), _delta_str(df["resale_price"].mean(), filtered["resale_price"].mean())),
-        ("最高单价", f"S${filtered['price_per_sqm'].max():,.0f}", None),
-        ("最低单价", f"S${filtered['price_per_sqm'].min():,.0f}", None),
     ]
     for i, (label, val, delta) in enumerate(metrics_row1):
         with cols[i]:
             st.metric(label, val, delta=delta)
 
-    # ---- Row 2: Supplementary KPIs ----
-    cols2 = st.columns(3)
+    # ---- Row 2: Required KPIs continued (4 cols, no deltas) ----
+    cols2 = st.columns(4)
     metrics_row2 = [
-        ("中位总价", fmt_price(filtered["resale_price"].median()), _delta_str(df["resale_price"].median(), filtered["resale_price"].median())),
-        ("最高总价", fmt_price(filtered["resale_price"].max()), None),
+        ("最高单价", f"S${filtered['price_per_sqm'].max():,.0f}", None),
+        ("最低单价", f"S${filtered['price_per_sqm'].min():,.0f}", None),
+        ("中位总价", fmt_price(filtered["resale_price"].median()), None),
         ("总成交额", fmt_price(filtered["resale_price"].sum()), None),
     ]
     for i, (label, val, delta) in enumerate(metrics_row2):
@@ -261,7 +260,7 @@ def _delta_str(base: float, current: float) -> str:
     if pd.isna(base) or base == 0:
         return None
     d = (current - base) / base * 100
-    return f"{d:+.1f}% vs 全量"
+    return f"{d:+.1f}%"
 
 
 def _town_breakdown(df: pd.DataFrame) -> pd.DataFrame:
@@ -296,7 +295,7 @@ def _render_trend_chart(filtered: pd.DataFrame):
         trend, x="month", y="resale_price", color="town",
         color_discrete_map=TOWN_COLORS,
         title="月度均价走势",
-        labels={"month": "", "resale_price": "均价 (SGD)", "town": "镇区"},
+        labels={"month": "", "resale_price": "均价 (新元)", "town": "镇区"},
     )
     fig.update_layout(height=360, margin=dict(l=0, r=0, t=30, b=0), legend=dict(orientation="h", y=1.1))
     st.plotly_chart(fig, width='stretch')
@@ -330,7 +329,7 @@ def _render_price_distribution(filtered: pd.DataFrame):
         filtered, x="resale_price", color="town", nbins=50,
         color_discrete_map=TOWN_COLORS,
         title="转售价格分布",
-        labels={"resale_price": "价格 (SGD)", "count": "数量"},
+        labels={"resale_price": "价格 (新元)", "count": "数量"},
         opacity=0.75,
     )
     fig.update_layout(height=360, margin=dict(l=0, r=0, t=30, b=0), legend=dict(orientation="h", y=1.1))
@@ -347,7 +346,7 @@ def _render_town_type_matrix(filtered: pd.DataFrame):
     fig = px.imshow(
         matrix, text_auto=",.0f", color_continuous_scale="Blues",
         title="镇区 × 房型 均价矩阵",
-        labels=dict(x="房型", y="镇区", color="均价 (SGD)"),
+        labels=dict(x="房型", y="镇区", color="均价 (新元)"),
     )
     fig.update_layout(height=360, margin=dict(l=0, r=0, t=30, b=0))
     st.plotly_chart(fig, width='stretch')

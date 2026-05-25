@@ -14,7 +14,7 @@ TOWN_COORDS = {
 
 
 def fmt_price(v: float) -> str:
-    """Format price in SGD."""
+    """Format price in 新元."""
     if pd.isna(v):
         return "—"
     if abs(v) >= 1_000_000:
