@@ -87,21 +87,13 @@ def _build_sidebar_filters(df: pd.DataFrame) -> dict:
 
         # ---- Flat Type ----
         st.caption("房型")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("✅ 全选", key="type_all", width='stretch'):
-                st.session_state.type_sel = sorted(df["flat_type"].unique())
-        with c2:
-            if st.button("🔄 清除", key="type_clr", width='stretch'):
-                st.session_state.type_sel = []
-
-        default_types = st.session_state.get("type_sel", sorted(df["flat_type"].unique()))
-        sel_types = st.multiselect(
-            "房型", sorted(df["flat_type"].unique()),
-            default=default_types, key="type_multi",
+        flat_types = ["全部"] + sorted(df["flat_type"].unique())
+        sel_type = st.selectbox(
+            "房型", flat_types,
+            key="type_select",
             label_visibility="collapsed",
         )
-        st.session_state.type_sel = sel_types
+        sel_types = sorted(df["flat_type"].unique()) if sel_type == "全部" else [sel_type]
 
         # ---- Floor Area ----
         st.caption("面积范围 (sqm)")
@@ -143,7 +135,7 @@ def _build_sidebar_filters(df: pd.DataFrame) -> dict:
         # ---- Reset All ----
         st.markdown("---")
         if st.button("🔃 重置全部筛选", width='stretch'):
-            for k in ["town_sel", "type_sel"]:
+            for k in ["town_sel"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -200,7 +192,7 @@ def _render_filter_chips(df: pd.DataFrame, filtered: pd.DataFrame, f: dict):
     if f["year_min"] != int(df["year"].min()) or f["year_max"] != int(df["year"].max()):
         chips.append(f"📅 {f['year_min']}–{f['year_max']}")
     all_types = sorted(df["flat_type"].unique())
-    if set(f["types"]) != set(all_types):
+    if f["types"] != all_types:
         chips.append(f"🏢 {', '.join(f['types'])}")
     if f["area_min"] != int(df["floor_area_sqm"].min()) or f["area_max"] != int(df["floor_area_sqm"].max()):
         chips.append(f"📐 {f['area_min']}–{f['area_max']} sqm")
@@ -225,38 +217,34 @@ def _render_stats_dashboard(df: pd.DataFrame, filtered: pd.DataFrame):
     """Dynamic statistics dashboard with metrics, deltas, and town breakdown."""
     st.subheader("📊 统计看板")
 
-    # ---- Row 1: Primary KPIs (8 cards) ----
+    # ---- Row 1: Required 5 KPIs ----
     avg_psm = filtered["price_per_sqm"].mean()
     all_avg_psm = df["price_per_sqm"].mean()
-    cols = st.columns(4)
+    cols = st.columns(5)
     metrics_row1 = [
-        ("交易套数", len(filtered), f"{len(filtered)/len(df)*100:.1f}% 占比" if len(df) > 0 else None),
-        ("平均总价", filtered["resale_price"].mean(), _delta_str(df["resale_price"].mean(), filtered["resale_price"].mean())),
-        ("中位总价", filtered["resale_price"].median(), _delta_str(df["resale_price"].median(), filtered["resale_price"].median())),
-        ("总成交额", filtered["resale_price"].sum(), None),
+        ("筛选后成交套数", len(filtered), f"{len(filtered)/len(df)*100:.1f}% 占比" if len(df) > 0 else None),
+        ("平均单价 (SGD/sqm)", f"S${avg_psm:,.0f}", _delta_str(all_avg_psm, avg_psm)),
+        ("平均总价 (SGD)", fmt_price(filtered["resale_price"].mean()), _delta_str(df["resale_price"].mean(), filtered["resale_price"].mean())),
+        ("最高单价 (SGD/sqm)", f"S${filtered['price_per_sqm'].max():,.0f}", None),
+        ("最低单价 (SGD/sqm)", f"S${filtered['price_per_sqm'].min():,.0f}", None),
     ]
     for i, (label, val, delta) in enumerate(metrics_row1):
         with cols[i]:
+            st.metric(label, val, delta=delta)
+
+    # ---- Row 2: Supplementary KPIs ----
+    cols2 = st.columns(4)
+    metrics_row2 = [
+        ("中位总价", filtered["resale_price"].median(), _delta_str(df["resale_price"].median(), filtered["resale_price"].median())),
+        ("最高总价", filtered["resale_price"].max(), None),
+        ("总成交额", filtered["resale_price"].sum(), None),
+    ]
+    for i, (label, val, delta) in enumerate(metrics_row2):
+        with cols2[i]:
             if isinstance(val, float):
                 st.metric(label, fmt_price(val), delta=delta)
             else:
                 st.metric(label, f"{val:,}" if isinstance(val, int) else fmt_price(val), delta=delta)
-
-    cols2 = st.columns(4)
-    metrics_row2 = [
-        ("平均单价", avg_psm, _delta_str(all_avg_psm, avg_psm)),
-        ("最高单价", filtered["price_per_sqm"].max(), None),
-        ("最低单价", filtered["price_per_sqm"].min(), None),
-        ("最高总价", filtered["resale_price"].max(), None),
-    ]
-    for i, (label, val, delta) in enumerate(metrics_row2):
-        with cols2[i]:
-            if "单价" in label:
-                st.metric(label, f"S${val:,.0f}/sqm", delta=delta)
-            elif isinstance(val, float):
-                st.metric(label, fmt_price(val), delta=delta)
-            else:
-                st.metric(label, f"{val:,}", delta=delta)
 
     # ---- Row 2: Per-Town Breakdown ----
     st.caption("镇区分组统计")
