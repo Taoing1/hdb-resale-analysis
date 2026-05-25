@@ -24,6 +24,7 @@ for _name, _file in [
     ("📈 影响因素分析", "03_factors"),
     ("🤖 价格预测", "04_prediction"),
     ("💡 购房策略", "05_strategy"),
+    ("💭 分析思考题", "06_questions"),
 ]:
     _page_modules[_name] = importlib.import_module(f"pages.{_file}")
 
