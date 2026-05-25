@@ -123,7 +123,7 @@ def _build_town_avg_map(df: pd.DataFrame) -> folium.Map:
         ).add_to(m)
 
     # Color legend via HTML
-    _add_color_legend(m, colormap, vmin, vmax, "均价 (SGD)")
+    _add_color_legend(m, colormap, vmin, vmax, "均价 (新元)")
 
     st.caption(f"圆圈大小 = 交易量 | 颜色深度 = 均价 (浅→深: {fmt_price(vmin)} → {fmt_price(vmax)})")
     _render_town_stats_table(stats)
@@ -225,7 +225,7 @@ def _build_temporal_map(df: pd.DataFrame) -> tuple:
             ),
         ).add_to(m)
 
-    _add_color_legend(m, colormap, vmin, vmax, f"{sel_year} 均价 (SGD)")
+    _add_color_legend(m, colormap, vmin, vmax, f"{sel_year} 均价 (新元)")
     return m, sel_year
 
 
@@ -236,7 +236,7 @@ def _render_temporal_chart(df: pd.DataFrame):
     fig = px.line(
         yearly, x="year", y="resale_price", color="town",
         color_discrete_map=TOWN_COLORS, markers=True,
-        labels={"year": "年份", "resale_price": "均价 (SGD)", "town": "镇区"},
+        labels={"year": "年份", "resale_price": "均价 (新元)", "town": "镇区"},
     )
     fig.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0), hovermode="x unified")
     st.plotly_chart(fig, width='stretch')

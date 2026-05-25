@@ -125,7 +125,7 @@ def run(df: pd.DataFrame):
                 x=y_test, y=m["pred"], opacity=0.45,
                 color=err_pct, color_continuous_scale="Reds",
                 title=f"{name} (误差率着色)",
-                labels={"x": "实际价格 (SGD)", "y": "预测价格 (SGD)", "color": "|误差%|"},
+                labels={"x": "实际价格 (新元)", "y": "预测价格 (新元)", "color": "|误差%|"},
             )
             fig.add_scatter(
                 x=[y_test.min(), y_test.max()], y=[y_test.min(), y_test.max()],
@@ -144,7 +144,7 @@ def run(df: pd.DataFrame):
                 # Residual histogram
                 fig1 = px.histogram(
                     residuals, nbins=50, title=f"{name} 残差分布",
-                    labels={"value": "残差 (SGD)", "count": "频数"},
+                    labels={"value": "残差 (新元)", "count": "频数"},
                 )
                 fig1.update_layout(height=280, margin=dict(l=0, r=0, t=30, b=0))
                 st.plotly_chart(fig1, width='stretch')
@@ -153,7 +153,7 @@ def run(df: pd.DataFrame):
                 fig2 = px.scatter(
                     x=m["pred"], y=residuals, opacity=0.4,
                     title=f"{name} 残差 vs 预测值",
-                    labels={"x": "预测价格 (SGD)", "y": "残差 (SGD)"},
+                    labels={"x": "预测价格 (新元)", "y": "残差 (新元)"},
                 )
                 fig2.add_hline(y=0, line_dash="dash", line_color="red")
                 fig2.update_layout(height=280, margin=dict(l=0, r=0, t=30, b=0))

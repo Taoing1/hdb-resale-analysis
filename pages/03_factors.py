@@ -76,7 +76,7 @@ def _analyze_flat_type(df: pd.DataFrame):
             df, x="flat_type", y="resale_price", color="flat_type",
             category_orders={"flat_type": type_order},
             title="各房型价格分布",
-            labels={"flat_type": "房型", "resale_price": "转售价格 (SGD)"},
+            labels={"flat_type": "房型", "resale_price": "转售价格 (新元)"},
         )
         fig.update_layout(height=420, showlegend=False, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, width='stretch')
@@ -125,7 +125,7 @@ def _analyze_floor_area(df: pd.DataFrame):
             sample, x="floor_area_sqm", y="resale_price", color="town",
             color_discrete_map=TOWN_COLORS, opacity=0.55, trendline="ols",
             title="面积 vs 价格 (含线性趋势)",
-            labels={"floor_area_sqm": "面积 (sqm)", "resale_price": "转售价格 (SGD)", "town": "镇区"},
+            labels={"floor_area_sqm": "面积 (sqm)", "resale_price": "转售价格 (新元)", "town": "镇区"},
         )
         fig.update_layout(height=400, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, width='stretch')
@@ -136,7 +136,7 @@ def _analyze_floor_area(df: pd.DataFrame):
             sample, x="floor_area_sqm", y="resale_price", color="flat_type",
             opacity=0.55, trendline="ols",
             title="面积 vs 价格 (分房型)",
-            labels={"floor_area_sqm": "面积 (sqm)", "resale_price": "转售价格 (SGD)", "flat_type": "房型"},
+            labels={"floor_area_sqm": "面积 (sqm)", "resale_price": "转售价格 (新元)", "flat_type": "房型"},
         )
         fig.update_layout(height=400, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, width='stretch')
@@ -176,7 +176,7 @@ def _analyze_lease(df: pd.DataFrame):
             lease_df, x="lease_bin", y="resale_price", color="town",
             color_discrete_map=TOWN_COLORS,
             title="剩余年限区间 vs 价格",
-            labels={"lease_bin": "剩余年限", "resale_price": "转售价格 (SGD)", "town": "镇区"},
+            labels={"lease_bin": "剩余年限", "resale_price": "转售价格 (新元)", "town": "镇区"},
         )
         fig.update_layout(height=400, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, width='stretch')
@@ -188,13 +188,13 @@ def _analyze_lease(df: pd.DataFrame):
             x="remaining_lease", y="resale_price", color="town",
             color_discrete_map=TOWN_COLORS, opacity=0.5, trendline="ols",
             title="剩余年限 (连续) vs 价格",
-            labels={"remaining_lease": "剩余年限 (年)", "resale_price": "转售价格 (SGD)", "town": "镇区"},
+            labels={"remaining_lease": "剩余年限 (年)", "resale_price": "转售价格 (新元)", "town": "镇区"},
         )
         fig.update_layout(height=400, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, width='stretch')
 
     # Per-town lease depreciation rate
-    st.caption("各镇区折旧斜率 (SGD/年):")
+    st.caption("各镇区折旧斜率 (新元/年):")
     slopes = {}
     for town in lease_df["town"].unique():
         sub = lease_df[lease_df["town"] == town]
@@ -223,7 +223,7 @@ def _analyze_town(df: pd.DataFrame):
             df, x="town", y="resale_price", color="town",
             color_discrete_map=TOWN_COLORS, box=True,
             title="镇区价格分布",
-            labels={"town": "镇区", "resale_price": "转售价格 (SGD)"},
+            labels={"town": "镇区", "resale_price": "转售价格 (新元)"},
         )
         fig.update_layout(height=400, showlegend=False, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, width='stretch')
@@ -234,7 +234,7 @@ def _analyze_town(df: pd.DataFrame):
         fig = px.imshow(
             matrix, text_auto=",.0f", color_continuous_scale="Blues",
             title="镇区 × 房型 均价矩阵",
-            labels=dict(x="房型", y="镇区", color="均价 (SGD)"),
+            labels=dict(x="房型", y="镇区", color="均价 (新元)"),
         )
         fig.update_layout(height=400, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, width='stretch')

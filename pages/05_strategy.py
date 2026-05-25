@@ -27,7 +27,7 @@ def run(df: pd.DataFrame):
         st.warning(f"当前约束下仅有 {len(candidates)} 条记录，建议放宽预算或房型条件。")
         return
 
-    st.markdown(f"符合条件: **{len(candidates):,}** 条 ({filters['budget_min']/1000:.0f}K–{filters['budget_max']/1000:.0f}K SGD, "
+    st.markdown(f"符合条件: **{len(candidates):,}** 条 ({filters['budget_min']/1000:.0f}K–{filters['budget_max']/1000:.0f}K 新元, "
                 f"{', '.join(filters['types'])})")
 
     # ---- Train/Test Split for Backtesting ----
@@ -87,8 +87,8 @@ def _build_sidebar(df: pd.DataFrame) -> dict:
     """Build sidebar constraint controls and return filter dict."""
     st.sidebar.subheader("🎯 购房约束")
 
-    budget_min = st.sidebar.number_input("最低预算 (SGD)", 0, 2_000_000, 300_000, 10_000)
-    budget_max = st.sidebar.number_input("最高预算 (SGD)", 0, 2_000_000, 600_000, 10_000)
+    budget_min = st.sidebar.number_input("最低预算 (新元)", 0, 2_000_000, 300_000, 10_000)
+    budget_max = st.sidebar.number_input("最高预算 (新元)", 0, 2_000_000, 600_000, 10_000)
 
     st.sidebar.markdown("---")
     target_types = st.sidebar.multiselect(
@@ -413,13 +413,13 @@ def _render_affordability(filters: dict):
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        price = st.number_input("目标房价 (SGD)", 200_000, 2_000_000, int(filters["budget_max"]), 10_000)
+        price = st.number_input("目标房价 (新元)", 200_000, 2_000_000, int(filters["budget_max"]), 10_000)
         down_pct = st.slider("首付比例 (%)", 10, 50, 25)
     with c2:
         rate = st.number_input("年利率 (%)", 0.1, 8.0, 4.0, 0.1)
         tenure = st.slider("贷款年限", 5, 30, 25)
     with c3:
-        cpf_oa = st.number_input("CPF OA 月缴 (SGD)", 0, 5_000, 800, 100)
+        cpf_oa = st.number_input("CPF OA 月缴 (新元)", 0, 5_000, 800, 100)
 
     down = price * down_pct / 100
     loan = price - down
@@ -448,7 +448,7 @@ def _policy_stub_bsd(price: float) -> dict:
     """计算买方印花税 (Buyer's Stamp Duty) — 待接入 IRAS 最新税率表.
 
     Args:
-        price: 成交价或市场价 (SGD).
+        price: 成交价或市场价 (新元).
 
     Returns:
         dict with keys: bsd_amount, effective_rate, notes.
@@ -503,7 +503,7 @@ def _policy_stub_hdb_eligibility(household_income: float, citizenship: str) -> d
     """检查 HDB 购买资格 (BTO/转售) — 待接入 HDB 官网最新资格标准.
 
     Args:
-        household_income: 家庭月收入 (SGD).
+        household_income: 家庭月收入 (新元).
         citizenship: 'SC', 'SC+SC', 'SC+SPR', 'SC+Foreigner'.
 
     Returns:
