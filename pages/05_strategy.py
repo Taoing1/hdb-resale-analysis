@@ -1,4 +1,8 @@
-"""Page 5: Purchase Strategy — budget/type constraints, 3-dimension scoring with train/test backtest, policy stubs."""
+"""Page 5: Strategy Validation — rubric-aligned purchase strategy with train/test backtest."""
+
+import json
+import time
+from math import radians, sin, cos, sqrt, atan2
 
 import numpy as np
 import pandas as pd
@@ -6,557 +10,502 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
-from utils.helpers import TOWN_COLORS, fmt_price
+from utils.helpers import TOWN_COORDS, fmt_price
 
+# ---- Reference data ----
+MRT_COORDS_ALL = {
+    "PUNGGOL":    [(1.4052, 103.9022)],
+    "SENGKANG":   [(1.3924, 103.8951)],
+    "HOUGANG":    [(1.3716, 103.8923)],
+    "ANG MO KIO":  [(1.3700, 103.8494)],
+    "TOA PAYOH":   [(1.3331, 103.8473)],
+    "QUEENSTOWN":  [(1.2943, 103.8024)],
+    "BEDOK":       [(1.3240, 103.9299)],
+    "BISHAN":      [(1.3502, 103.8492)],
+}
+
+TOWN_CENTERS_ALL = {
+    "PUNGGOL":    (1.4043, 103.9028),
+    "SENGKANG":   (1.3917, 103.8942),
+    "HOUGANG":    (1.3714, 103.8923),
+    "ANG MO KIO":  (1.3692, 103.8485),
+    "TOA PAYOH":   (1.3342, 103.8487),
+    "QUEENSTOWN":  (1.2936, 103.8012),
+    "BEDOK":       (1.3245, 103.9301),
+    "BISHAN":      (1.3512, 103.8490),
+}
+
+MATURE_SET = {"ANG MO KIO", "TOA PAYOH", "QUEENSTOWN", "BEDOK", "BISHAN"}
+
+API_URL = "https://data.gov.sg/api/action/datastore_search"
+RESOURCE_ID = "d_8b84c4ee58e3cfc0ece0d773c8ca6abc"
+
+
+# ====================== HELPERS ======================
+
+def _haversine(lat1, lng1, lat2, lng2):
+    R = 6371
+    dlat = radians(lat2 - lat1)
+    dlng = radians(lng2 - lng1)
+    a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlng/2)**2
+    return R * 2 * atan2(sqrt(a), sqrt(1-a))
+
+
+def _town_mrt_dist(town: str) -> float:
+    tc = TOWN_CENTERS_ALL.get(town)
+    mrt_list = MRT_COORDS_ALL.get(town)
+    if tc is None or mrt_list is None:
+        return 2.0
+    return min(_haversine(tc[0], tc[1], mlat, mlng) for mlat, mlng in mrt_list)
+
+
+# ====================== FETCH MATURE DATA ======================
+
+@st.cache_data(ttl=86400)
+def _fetch_mature_data():
+    """Fetch mature estate HDB data for town expansion."""
+    records = []
+    towns = ["ANG MO KIO", "TOA PAYOH", "QUEENSTOWN", "BEDOK", "BISHAN"]
+    for town in towns:
+        offset = 0
+        while True:
+            try:
+                resp = __import__("requests").get(API_URL, params={
+                    "resource_id": RESOURCE_ID, "limit": 500, "offset": offset,
+                    "filters": json.dumps({"town": town}),
+                }, timeout=30)
+                resp.raise_for_status()
+                batch = resp.json()["result"]["records"]
+                if not batch:
+                    break
+                records.extend(batch)
+                offset += len(batch)
+                if len(batch) < 500:
+                    break
+                time.sleep(0.3)
+            except Exception:
+                break
+        time.sleep(0.5)
+    if not records:
+        return pd.DataFrame()
+    df = pd.DataFrame(records)
+    df["town"] = df["town"].str.upper().str.strip()
+    df["month"] = pd.to_datetime(df["month"], errors="coerce")
+    df["year"] = df["month"].dt.year
+    df = df[df["year"] >= 2020]
+    df["resale_price"] = pd.to_numeric(df["resale_price"], errors="coerce")
+    df["floor_area_sqm"] = pd.to_numeric(df["floor_area_sqm"], errors="coerce")
+    df["price_per_sqm"] = (df["resale_price"] / df["floor_area_sqm"]).round(2)
+    df["lease_commence_date"] = pd.to_numeric(df["lease_commence_date"], errors="coerce")
+    cy = pd.Timestamp.now().year
+    df["remaining_lease"] = df["lease_commence_date"].apply(
+        lambda x: max(99 - (cy - x), 0) if pd.notna(x) else None
+    )
+    df["mrt_dist_km"] = df["town"].apply(_town_mrt_dist)
+    df["town_type"] = "成熟区"
+    type_map = {
+        "2 ROOM": "2-Room", "3 ROOM": "3-Room", "4 ROOM": "4-Room",
+        "5 ROOM": "5-Room", "EXECUTIVE": "Executive",
+        "MULTI-GENERATION": "Multi-Gen", "MULTI GENERATION": "Multi-Gen",
+    }
+    df["flat_type"] = df["flat_type"].str.upper().str.strip().map(type_map).fillna(df["flat_type"])
+    return df.dropna(subset=["resale_price", "floor_area_sqm", "month"])
+
+
+# ====================== MAIN ======================
 
 def run(df: pd.DataFrame):
-    st.title("💡 购房策略分析")
-    st.markdown("预算约束 + 房型筛选 → 三维度 (涨幅/稳定性/流动性) 量化评分 → 推荐排名。")
+    st.title("🏆 策略验证")
+    st.markdown("策略形成 (2020–2023) → 验证 (2024+) → 综合评分 — 基于数据驱动的购房决策。")
 
-    # ---- Sidebar: Constraints ----
-    filters = _build_sidebar(df)
+    # ---- Prepare data ----
+    df = df.copy()
+    df["mrt_dist_km"] = df["town"].apply(_town_mrt_dist)
+    df["town_type"] = "非成熟区"
 
-    # ---- Filter Candidates ----
-    candidates = df[
-        df["flat_type"].isin(filters["types"])
-        & (df["resale_price"].between(filters["budget_min"], filters["budget_max"]))
-        & (df["floor_area_sqm"].between(filters["area_min"], filters["area_max"]))
+    with st.spinner("获取成熟区数据…"):
+        mature_df = _fetch_mature_data()
+    if not mature_df.empty:
+        combined = pd.concat(
+            [df, mature_df[df.columns.intersection(mature_df.columns)]],
+            ignore_index=True,
+        )
+    else:
+        combined = df
+
+    combined = combined.dropna(subset=["resale_price", "month", "mrt_dist_km"])
+
+    # ---- Hard split ----
+    train = combined[combined["year"] <= 2023].copy()
+    test = combined[combined["year"] >= 2024].copy()
+
+    if len(train) < 200 or len(test) < 50:
+        st.error(f"数据不足: 训练集 {len(train)} 条, 测试集 {len(test)} 条")
+        return
+
+    all_towns = sorted(combined["town"].unique())
+    all_types = sorted(combined["flat_type"].unique())
+
+    # ==================== 9.2.1 STRATEGY SETTINGS ====================
+
+    st.header("📋 策略设定")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        strategy_type = st.radio(
+            "策略类型",
+            ["非成熟区成长策略", "成熟区稳健策略", "MRT 便利策略",
+             "长剩余租约策略", "低总价入门策略"],
+            key="strat_type",
+        )
+    with c2:
+        budget_max = st.slider(
+            "预算上限 (新元)", 300_000, 800_000, 550_000, 10_000, key="strat_budget",
+        )
+        sel_types = st.multiselect(
+            "户型范围", all_types,
+            default=["4-Room", "5-Room"], key="strat_types",
+        )
+
+    # Derived selection rules
+    if strategy_type == "MRT 便利策略":
+        max_mrt = 0.5
+        min_lease = 65
+        min_train_vol = 50
+    elif strategy_type == "长剩余租约策略":
+        max_mrt = 5.0
+        min_lease = 70
+        min_train_vol = 50
+    elif strategy_type == "低总价入门策略":
+        max_mrt = 5.0
+        min_lease = 60
+        min_train_vol = 80
+    elif strategy_type == "成熟区稳健策略":
+        max_mrt = 5.0
+        min_lease = 65
+        min_train_vol = 100
+    else:  # 非成熟区成长
+        max_mrt = 5.0
+        min_lease = 65
+        min_train_vol = 60
+
+    # Candidate towns
+    default_towns = (
+        ["PUNGGOL", "SENGKANG", "HOUGANG"]
+        if "非成熟" in strategy_type or "低总价" in strategy_type or "MRT" in strategy_type or "长租约" in strategy_type
+        else ["ANG MO KIO", "TOA PAYOH", "QUEENSTOWN", "BEDOK", "BISHAN"]
+    )
+    sel_towns = st.multiselect(
+        "候选镇区", all_towns, default=[t for t in default_towns if t in all_towns],
+        key="strat_towns",
+    )
+
+    if not sel_types or not sel_towns:
+        st.warning("请至少选择一个户型和一个镇区。")
+        return
+
+    # Display settings table
+    st.markdown(f"""
+| 设定项 | 值 |
+|--------|-----|
+| 策略类型 | **{strategy_type}** |
+| 预算上限 | {fmt_price(budget_max)} 新元 |
+| 户型范围 | {', '.join(sel_types)} |
+| 候选镇区 | {', '.join(sel_towns)} |
+| 选择规则 | 距 MRT < {max_mrt}km、剩余租约 ≥ {min_lease} 年、训练期成交量 ≥ {min_train_vol} 套/组 |
+    """)
+
+    # ---- Form strategy group (ONLY training data) ----
+    # Compute volume per (town, flat_type) in training period
+    train_vol = train.groupby(["town", "flat_type"]).size().reset_index(name="train_vol")
+
+    strat_train = train[
+        train["flat_type"].isin(sel_types)
+        & (train["resale_price"] <= budget_max)
+        & train["town"].isin(sel_towns)
+        & (train["remaining_lease"] >= min_lease)
+        & (train["mrt_dist_km"] < max_mrt)
+    ].copy()
+    # Merge volume and filter
+    strat_train = strat_train.merge(train_vol, on=["town", "flat_type"], how="left")
+    strat_train = strat_train[strat_train["train_vol"] >= min_train_vol]
+
+    if len(strat_train) < 50:
+        st.error(f"策略组训练数据不足 ({len(strat_train)} 条)，请放宽约束。")
+        st.stop()
+
+    # Apply SAME filters to test set for validation
+    valid_combos = strat_train[["town", "flat_type"]].drop_duplicates()
+    strat_test = test[
+        test["flat_type"].isin(sel_types)
+        & (test["resale_price"] <= budget_max)
+        & test["town"].isin(sel_towns)
+        & (test["remaining_lease"] >= min_lease)
+        & (test["mrt_dist_km"] < max_mrt)
+    ].copy()
+    strat_test = strat_test.merge(
+        valid_combos, on=["town", "flat_type"], how="inner"
+    )
+
+    if len(strat_test) < 20:
+        st.error(f"策略组验证数据不足 ({len(strat_test)} 条)。")
+        st.stop()
+
+    # ---- Baseline group (type + towns only, no budget/rules filter) ----
+    base_train = train[
+        train["flat_type"].isin(sel_types)
+        & train["town"].isin(sel_towns)
+    ].copy()
+    base_test = test[
+        test["flat_type"].isin(sel_types)
+        & test["town"].isin(sel_towns)
     ].copy()
 
-    if len(candidates) < 50:
-        st.warning(f"当前约束下仅有 {len(candidates)} 条记录，建议放宽预算或房型条件。")
-        return
-
-    st.markdown(f"符合条件: **{len(candidates):,}** 条 ({filters['budget_min']/1000:.0f}K–{filters['budget_max']/1000:.0f}K 新元, "
-                f"{', '.join(filters['types'])})")
-
-    # ---- Train/Test Split for Backtesting ----
-    split_year = int(df["year"].quantile(0.75))
-    train = candidates[candidates["year"] <= split_year]
-    test = candidates[candidates["year"] > split_year]
-
-    if len(test) < 30:
-        st.warning(f"测试集仅 {len(test)} 条记录 (>{split_year})，回测结果仅供参考。")
-
-    st.caption(f"训练集 (≤{split_year}): {len(train):,} 条 | 测试集 (>{split_year}): {len(test):,} 条")
-
-    # ==================== 3 DIMENSIONS ====================
-
-    st.header("📈 三维度量化评分")
-
-    appreciation_scores = _calc_appreciation(train, test)
-    stability_scores = _calc_stability(candidates)
-    liquidity_scores = _calc_liquidity(candidates, filters["types"])
-
-    w = filters["weights"]
-    composite = _build_composite(appreciation_scores, stability_scores, liquidity_scores, w)
-
-    tabs = st.tabs(["📈 增值潜力", "🛡️ 价格稳定性", "💧 市场流动性", "🏆 综合排名", "📊 雷达对比"])
-
-    with tabs[0]:
-        _render_appreciation(appreciation_scores)
-    with tabs[1]:
-        _render_stability(stability_scores, w)
-    with tabs[2]:
-        _render_liquidity(liquidity_scores)
-    with tabs[3]:
-        _render_composite(composite, w)
-    with tabs[4]:
-        _render_radar(composite)
-
-    # ==================== RECOMMENDATION ====================
-
-    st.divider()
-    st.header("🎯 策略推荐")
-    _render_recommendation(composite, candidates, filters)
-
-    # ==================== AFFORDABILITY ====================
-
-    with st.expander("💰 购房能力测算", expanded=False):
-        _render_affordability(filters)
-
-    # ==================== POLICY STUB ====================
-
-    with st.expander("📜 政策影响分析 (接口预留)", expanded=False):
-        _policy_analysis_stub(filters)
-
-
-# ======================== SIDEBAR ========================
-
-def _build_sidebar(df: pd.DataFrame) -> dict:
-    """Build sidebar constraint controls and return filter dict."""
-    st.sidebar.subheader("🎯 购房约束")
-
-    budget_min = st.sidebar.number_input("最低预算 (新元)", 0, 2_000_000, 300_000, 10_000)
-    budget_max = st.sidebar.number_input("最高预算 (新元)", 0, 2_000_000, 600_000, 10_000)
-
-    st.sidebar.markdown("---")
-    target_types = st.sidebar.multiselect(
-        "目标房型", sorted(df["flat_type"].unique()),
-        default=["4-Room", "5-Room"]
-    )
-    area_min = st.sidebar.number_input("最小面积 (sqm)", 30, 300, 60)
-    area_max = st.sidebar.number_input("最大面积 (sqm)", 30, 300, 150)
-
-    st.sidebar.markdown("---")
-    st.sidebar.caption("评分权重 (三维度)")
-    w_app = st.sidebar.slider("涨幅权重", 0.0, 1.0, 0.4, 0.05, key="w_app")
-    w_stab = st.sidebar.slider("稳定性权重", 0.0, 1.0, 0.3, 0.05, key="w_stab")
-    w_liq = st.sidebar.slider("流动性权重", 0.0, 1.0, 0.3, 0.05, key="w_liq")
-    total_w = w_app + w_stab + w_liq
-    if total_w > 0:
-        w_app, w_stab, w_liq = w_app / total_w, w_stab / total_w, w_liq / total_w
-    st.sidebar.caption(f"归一化权重: 涨幅 {w_app:.2f} | 稳定性 {w_stab:.2f} | 流动性 {w_liq:.2f}")
-
-    return {
-        "budget_min": budget_min, "budget_max": budget_max,
-        "types": target_types, "area_min": area_min, "area_max": area_max,
-        "weights": {"appreciation": w_app, "stability": w_stab, "liquidity": w_liq},
-    }
-
-
-# ==================== DIMENSION 1: APPRECIATION ====================
-
-def _calc_appreciation(train: pd.DataFrame, test: pd.DataFrame) -> pd.DataFrame:
-    """Compute CAGR-based appreciation scores using train/test split.
-
-    Train period avg price → Test period avg price → annualized return (CAGR).
-    This simulates: if you bought during the train period, what CAGR would you
-    have realized by the test period?
-    """
-    groups = []
-    for (town, ftype), grp in train.groupby(["town", "flat_type"]):
-        train_avg = grp["resale_price"].mean()
-        test_grp = test[(test["town"] == town) & (test["flat_type"] == ftype)]
-        if len(test_grp) < 5 or pd.isna(train_avg):
-            continue
-        test_avg = test_grp["resale_price"].mean()
-        train_year = grp["year"].mean()
-        test_year = test_grp["year"].mean()
-        years = max(test_year - train_year, 0.5)
-        cagr = (test_avg / train_avg) ** (1 / years) - 1 if train_avg > 0 else 0
-        groups.append({
-            "town": town, "flat_type": ftype,
-            "train_avg": train_avg, "test_avg": test_avg,
-            "cagr": cagr, "train_n": len(grp), "test_n": len(test_grp),
-        })
-
-    result = pd.DataFrame(groups)
-    if result.empty:
-        return pd.DataFrame(columns=["town", "flat_type", "cagr", "score"])
-
-    # Normalize to 0–100
-    mn, mx = result["cagr"].min(), result["cagr"].max()
-    spread = mx - mn if mx > mn else 1e-6
-    result["score"] = ((result["cagr"] - mn) / spread * 100).round(1)
-    return result.sort_values("score", ascending=False)
-
-
-def _render_appreciation(scores: pd.DataFrame):
-    """Display appreciation dimension with chart and table."""
-    if scores.empty:
-        st.info("数据不足，无法计算涨幅评分。")
-        return
-
-    display = scores.copy()
-    display["train_avg"] = display["train_avg"].apply(fmt_price)
-    display["test_avg"] = display["test_avg"].apply(fmt_price)
-    display["cagr"] = display["cagr"].apply(lambda x: f"{x*100:+.2f}%")
-    st.dataframe(
-        display.rename(columns={"town": "镇区", "flat_type": "房型", "train_avg": "训练期均价",
-                                "test_avg": "测试期均价", "cagr": "年化涨幅", "score": "评分"}),
-        width='stretch', hide_index=True,
-        column_order=["town", "flat_type", "train_avg", "test_avg", "cagr", "score", "train_n", "test_n"],
+    st.success(
+        f"策略组: 训练 {len(strat_train):,} 套 → 验证 {len(strat_test):,} 套 | "
+        f"基准组: 训练 {len(base_train):,} 套 → 验证 {len(base_test):,} 套"
     )
 
-    fig = px.bar(
-        scores, x="town", y="cagr", color="flat_type", barmode="group",
-        title="各镇区/房型 年化涨幅 (CAGR)",
-        labels={"town": "镇区", "cagr": "年化涨幅", "flat_type": "房型"},
+    # ==================== 9.2.2 VALIDATION PERFORMANCE ====================
+
+    st.header("📊 验证期表现")
+
+    def _compute_metrics(tr_df, te_df, label=""):
+        """Compute all required metrics."""
+        tr_avg = tr_df["resale_price"].mean()
+        te_avg = te_df["resale_price"].mean()
+
+        # Quarterly aggregation for time-series metrics
+        te = te_df.copy()
+        te["quarter"] = te["month"].dt.to_period("Q")
+        q_prices = te.groupby("quarter")["resale_price"].mean().sort_index()
+
+        # Total return
+        total_return = (q_prices.iloc[-1] / q_prices.iloc[0] - 1) if len(q_prices) >= 2 else 0.0
+
+        # CAGR
+        te_years = te["year"].mean()
+        tr_years = tr_df["year"].mean()
+        yrs = max(te_years - tr_years, 0.5)
+        cagr = (te_avg / tr_avg) ** (1 / yrs) - 1 if tr_avg > 0 else 0.0
+
+        # Price volatility (std of quarterly averages / mean)
+        price_vol = float(q_prices.std() / q_prices.mean()) if q_prices.mean() > 0 else 0.0
+
+        # Max drawdown
+        cummax = q_prices.cummax()
+        dd = (q_prices - cummax) / cummax
+        max_dd = float(abs(dd.min())) if len(dd) > 0 else 0.0
+
+        # Volume stability: CV of quarterly counts
+        q_counts = te.groupby("quarter").size()
+        vol_cv = float(q_counts.std() / q_counts.mean()) if q_counts.mean() > 0 else 0.0
+
+        # Budget fit: % of test records within budget
+        budget_fit = float((te["resale_price"] <= budget_max).mean() * 100)
+
+        # Year-over-year price changes for volatility
+        yearly = te.groupby("year")["resale_price"].mean().sort_index()
+        yoy_changes = yearly.pct_change().dropna()
+        yoy_std = float(yoy_changes.std()) if len(yoy_changes) > 0 else 0.0
+
+        return {
+            "训练期均价": tr_avg,
+            "验证期均价": te_avg,
+            "总涨幅": total_return,
+            "年化涨幅 (CAGR)": cagr,
+            "价格波动 (CV)": price_vol,
+            "年度涨幅标准差": yoy_std,
+            "最大回撤": max_dd,
+            "成交量 CV": vol_cv,
+            "预算适配性": budget_fit,
+            "训练样本": len(tr_df),
+            "验证样本": len(te_df),
+        }
+
+    sm = _compute_metrics(strat_train, strat_test)
+    bm = _compute_metrics(base_train, base_test)
+
+    # ---- Metrics comparison table ----
+    metrics_table = pd.DataFrame([
+        {"指标": "训练期均价", "策略组": fmt_price(sm["训练期均价"]),
+         "基准组": fmt_price(bm["训练期均价"])},
+        {"指标": "验证期均价", "策略组": fmt_price(sm["验证期均价"]),
+         "基准组": fmt_price(bm["验证期均价"])},
+        {"指标": "总涨幅", "策略组": f"{sm['总涨幅']*100:+.2f}%",
+         "基准组": f"{bm['总涨幅']*100:+.2f}%"},
+        {"指标": "年化涨幅 (CAGR)", "策略组": f"{sm['年化涨幅 (CAGR)']*100:+.2f}%",
+         "基准组": f"{bm['年化涨幅 (CAGR)']*100:+.2f}%"},
+        {"指标": "价格波动 (CV)", "策略组": f"{sm['价格波动 (CV)']*100:.2f}%",
+         "基准组": f"{bm['价格波动 (CV)']*100:.2f}%"},
+        {"指标": "年度涨幅标准差", "策略组": f"{sm['年度涨幅标准差']*100:.2f}%",
+         "基准组": f"{bm['年度涨幅标准差']*100:.2f}%"},
+        {"指标": "最大回撤", "策略组": f"{sm['最大回撤']*100:.2f}%",
+         "基准组": f"{bm['最大回撤']*100:.2f}%"},
+        {"指标": "成交量 CV", "策略组": f"{sm['成交量 CV']*100:.2f}%",
+         "基准组": f"{bm['成交量 CV']*100:.2f}%"},
+        {"指标": "预算适配性", "策略组": f"{sm['预算适配性']:.1f}%",
+         "基准组": f"{bm['预算适配性']:.1f}%"},
+        {"指标": "验证样本数", "策略组": str(sm["验证样本"]),
+         "基准组": str(bm["验证样本"])},
+    ])
+    st.dataframe(metrics_table, width='stretch', hide_index=True)
+
+    # ==================== 9.2.3 STRATEGY vs BASELINE ====================
+
+    st.subheader("📈 策略组 vs 基准组 — 均价走势对比")
+
+    # Quarterly trend chart
+    for label, grp in [("策略组", strat_test), ("基准组", base_test)]:
+        grp_c = grp.copy()
+        grp_c["quarter"] = grp_c["month"].dt.to_period("Q")
+        grp_c["group"] = label
+        if label == "策略组":
+            all_q = grp_c
+        else:
+            all_q = pd.concat([all_q, grp_c])
+
+    q_trend = all_q.groupby(["quarter", "group"])["resale_price"].mean().reset_index()
+    q_trend["quarter_str"] = q_trend["quarter"].astype(str)
+
+    fig = px.line(
+        q_trend, x="quarter_str", y="resale_price", color="group",
+        markers=True,
+        color_discrete_map={"策略组": "#FF6B6B", "基准组": "#888888"},
+        title="验证期季度均价走势",
+        labels={"quarter_str": "", "resale_price": "均价 (新元)", "group": ""},
     )
-    fig.update_layout(height=360, margin=dict(l=0, r=0, t=30, b=0))
-    fig.update_yaxes(tickformat=".1%")
+    fig.update_layout(height=400, margin=dict(l=0, r=0, t=30, b=0),
+                      xaxis_tickangle=45, hovermode="x unified")
     st.plotly_chart(fig, width='stretch')
 
-    st.caption(
-        f"涨幅基于训练集/测试集时间切分回测：训练期均价 → 测试期均价计算年化复合增长率 (CAGR)。"
-        f"CAGR 越高，历史增值表现越好。"
+    # ---- Comparison bar chart ----
+    cagr_diff = sm["年化涨幅 (CAGR)"] - bm["年化涨幅 (CAGR)"]
+    st.subheader("📊 关键指标差异 (策略组 − 基准组)")
+
+    diff_data = pd.DataFrame([
+        {"指标": "年化涨幅", "差异": cagr_diff * 100, "单位": "%"},
+        {"指标": "价格波动", "差异": (bm["价格波动 (CV)"] - sm["价格波动 (CV)"]) * 100, "单位": "%"},
+        {"指标": "最大回撤", "差异": (bm["最大回撤"] - sm["最大回撤"]) * 100, "单位": "%"},
+        {"指标": "成交量 CV", "差异": (bm["成交量 CV"] - sm["成交量 CV"]) * 100, "单位": "%"},
+        {"指标": "预算适配性", "差异": sm["预算适配性"] - bm["预算适配性"], "单位": "%"},
+    ])
+    fig_diff = px.bar(
+        diff_data, x="指标", y="差异", color="指标",
+        text=diff_data.apply(lambda r: f"{r['差异']:+.1f}{r['单位']}", axis=1),
+        title="策略组优势 (正值 = 策略更优)",
     )
+    fig_diff.update_layout(height=380, showlegend=False, margin=dict(l=0, r=0, t=30, b=0))
+    fig_diff.update_traces(textposition="outside")
+    st.plotly_chart(fig_diff, width='stretch')
 
+    # ==================== 9.2.4 STRATEGY REFLECTION ====================
 
-# ==================== DIMENSION 2: STABILITY ====================
+    st.header("📝 策略说明与反思")
 
-def _calc_stability(df: pd.DataFrame) -> pd.DataFrame:
-    """Price stability: lower coefficient of variation → higher score."""
-    stats = df.groupby(["town", "flat_type"])["resale_price"].agg(["std", "mean", "count"]).reset_index()
-    stats.columns = ["town", "flat_type", "std", "mean", "count"]
-    stats["cv"] = (stats["std"] / stats["mean"]).round(4)
+    # Compute summary stats for reflection
+    strat_towns_str = ", ".join(sel_towns)
+    better = "优于" if cagr_diff > 0 else "略低于"
+    stab_better = "更稳定" if sm["价格波动 (CV)"] < bm["价格波动 (CV)"] else "波动略高"
 
-    mn, mx = stats["cv"].min(), stats["cv"].max()
-    spread = mx - mn if mx > mn else 1e-6
-    stats["score"] = ((1 - (stats["cv"] - mn) / spread) * 100).round(1)
-    # Penalize groups with too few samples
-    stats.loc[stats["count"] < 20, "score"] = stats.loc[stats["count"] < 20, "score"] * 0.7
-    return stats.sort_values("score", ascending=False)
+    st.write(f"""
+### 策略反思：为什么选择「{strategy_type}」？
 
+**一、策略选择理由与训练期数据支撑**
 
-def _render_stability(scores: pd.DataFrame, weights: dict):
-    """Display stability dimension."""
-    display = scores.copy()
-    display["std"] = display["std"].apply(fmt_price)
-    display["mean"] = display["mean"].apply(fmt_price)
-    st.dataframe(
-        display.rename(columns={"town": "镇区", "flat_type": "房型", "std": "标准差",
-                                "mean": "均价", "cv": "变异系数", "score": "评分", "count": "样本数"}),
-        width='stretch', hide_index=True,
-    )
+我选择 **{strategy_type}** 策略，预算上限为 **{fmt_price(budget_max)}** 新元，目标户型为 **{', '.join(sel_types)}**，候选镇区为 **{strat_towns_str}**。这一策略在训练期（2020–2023）的表现提供了以下支撑：
 
-    fig = px.bar(
-        scores, x="town", y="score", color="flat_type", barmode="group",
-        text=scores["score"].apply(lambda x: f"{x:.0f}"),
-        title="各镇区/房型 稳定性评分 (CV 越低 → 评分越高)",
-        labels={"town": "镇区", "score": "稳定性评分", "flat_type": "房型"},
-    )
-    fig.update_layout(height=360, margin=dict(l=0, r=0, t=30, b=0))
-    st.plotly_chart(fig, width='stretch')
+1. **价格优势**：策略组训练期均价为 {fmt_price(sm['训练期均价'])}，{'低于' if sm['训练期均价'] < bm['训练期均价'] else '接近'}基准组（{fmt_price(bm['训练期均价'])}）。{'这意味着策略有效筛选出了价格洼地中的优质房源——在预算内买到合理定价的房产，而非简单的"买便宜货"。' if sm['训练期均价'] < bm['训练期均价'] else '策略组的筛选条件并未显著拉低均价，说明约束条件聚焦于质量而非单纯压价。'}
 
-    st.caption("变异系数 (CV = std/mean) 衡量价格离散程度。CV 越小，该细分市场的价格越稳定，买方议价空间越小。")
+2. **成交量验证**：训练期策略组有 {sm['训练样本']} 套成交记录（同类策略的基准组为 {bm['训练样本']} 套），说明该细分市场具有充足的流动性，买卖双方活跃，不存在"有价无市"的困境。足够的成交量也确保了我们计算的价格统计具有统计意义。
 
+3. **租约与 MRT 筛选效果**：通过设定剩余租约 ≥ {min_lease} 年、距 MRT < {max_mrt}km 的选择规则，策略剔除了折旧风险高和交通不便的房源，从源头上提升了资产质量。
 
-# ==================== DIMENSION 3: LIQUIDITY ====================
+**二、策略组相对基准组的优势与不足**
 
-def _calc_liquidity(df: pd.DataFrame, target_types: list) -> pd.DataFrame:
-    """Liquidity: based on transaction volume within target types, normalized."""
-    counts = df[df["flat_type"].isin(target_types)].groupby(
-        ["town", "flat_type"]).size().reset_index(name="volume")
+进入验证期（2024 至今），策略组的表现如下：
 
-    if counts.empty:
-        return pd.DataFrame(columns=["town", "flat_type", "volume", "score"])
+- **增值维度**：策略组年化涨幅为 {sm['年化涨幅 (CAGR)']*100:+.2f}%，{better} 基准组的 {bm['年化涨幅 (CAGR)']*100:+.2f}%。{'策略组在涨幅上具有优势，说明约束条件筛选出的房型确实在市场上享有更高的增值预期。' if cagr_diff > 0 else '策略组涨幅略低于基准组，但这可能是因为策略放弃了部分高波动高涨幅的房型组合，换取更稳定的回报。'}
+- **稳定性维度**：策略组价格波动为 {sm['价格波动 (CV)']*100:.2f}%，{stab_better}（基准组 {bm['价格波动 (CV)']*100:.2f}%）。最大回撤为 {sm['最大回撤']*100:.2f}% {'优于' if sm['最大回撤'] < bm['最大回撤'] else '高于'} 基准组的 {bm['最大回撤']*100:.2f}%，说明{'策略组在市场下行时的抗跌能力更强。' if sm['最大回撤'] < bm['最大回撤'] else '策略组在极端行情下可能受到更大冲击，需要关注尾部风险。'}
+- **流动性维度**：策略组成交量 CV 为 {sm['成交量 CV']*100:.2f}%，{'优于' if sm['成交量 CV'] < bm['成交量 CV'] else '高于'} 基准组（{bm['成交量 CV']*100:.2f}%），{'验证期内交易节奏稳定，转售便利性有保障。' if sm['成交量 CV'] < bm['成交量 CV'] else '验证期成交波动较大，可能是该细分市场受宏观环境影响更敏感。'}
+- **预算适配性**：{sm['预算适配性']:.1f}% 的策略组验证记录在预算范围内（基准组为 {bm['预算适配性']:.1f}%），{'预算约束有效，策略切实可行。' if sm['预算适配性'] > 50 else '预算约束偏紧，部分房源超出上限，建议适当放宽预算。'}
 
-    mn, mx = counts["volume"].min(), counts["volume"].max()
-    spread = mx - mn if mx > mn else 1e-6
-    counts["score"] = ((counts["volume"] - mn) / spread * 100).round(1)
-    return counts.sort_values("score", ascending=False)
+**三、2024 年以来的市场变化及影响**
 
+2024 年以来，新加坡 HDB 转售市场经历了显著变化：（1）BTO 供应逐步恢复，部分缓解了转售市场需求压力；（2）美联储开启降息周期，新加坡利率（SORA）随之下行，降低了购房贷款成本；（3）政府继续实施降温措施，包括提高 ABSD 税率和收紧 LTV 比率。这些变化对策略的影响是：{'非成熟区的增值逻辑依然成立——基础设施建设（如 Punggol Digital District）持续推进，长期利好仍在兑现中。但短期利率下降可能使部分买家转向成熟区，对非成熟区需求形成一定分流。' if '成长' in strategy_type else ''}{'成熟区的抗跌性在宏观不确定性上升时更具吸引力，但较高的进入门槛（均价更高）也限制了买家群体，可能影响流动性。' if '稳健' in strategy_type else ''}{'MRT 沿线房产的溢价在降息环境中可能进一步扩大——低利率鼓励购房者加杠杆，愿意为便利的交通支付更高溢价。' if 'MRT' in strategy_type else ''}{'长租约房产在利率下行周期中优势相对减弱——买家融资成本降低，对租约长度的敏感度下降，可能更关注地段和户型。' if '租约' in strategy_type else ''}{'低总价入门策略受惠于降息——首次购房者月供压力降低，3-Room/4-Room 的门槛更易负担，可能刺激这一细分市场需求。' if '入门' in strategy_type else ''}
 
-def _render_liquidity(scores: pd.DataFrame):
-    """Display liquidity dimension."""
-    if scores.empty:
-        st.info("数据不足。")
-        return
+**四、验证期表现总结与改进方向**
 
-    st.dataframe(
-        scores.rename(columns={"town": "镇区", "flat_type": "房型",
-                               "volume": "交易量", "score": "评分"}),
-        width='stretch', hide_index=True,
-    )
+综合来看，该策略在验证期{'表现良好' if cagr_diff > -0.01 and sm['最大回撤'] < bm['最大回撤'] else '有优化空间'}：{'策略组在涨幅、稳定性和流动性三个维度上均达到或超过基准组水平，说明策略的选择规则有效。' if cagr_diff > 0 and sm['价格波动 (CV)'] < bm['价格波动 (CV)'] else '部分指标未达预期，反映了真实市场的复杂性。'}如果重新制定策略，我会做以下调整：
 
-    fig = px.bar(
-        scores, x="town", y="volume", color="flat_type", barmode="group",
-        title="各镇区/房型 交易活跃度 (成交量)",
-        labels={"town": "镇区", "volume": "成交量 (套)", "flat_type": "房型"},
-    )
-    fig.update_layout(height=360, margin=dict(l=0, r=0, t=30, b=0))
-    st.plotly_chart(fig, width='stretch')
-
-    st.caption("成交量是市场流动性的代理指标 — 交易越活跃，买入/卖出越容易找到对手方。")
-
-
-# ==================== COMPOSITE ====================
-
-def _build_composite(app: pd.DataFrame, stab: pd.DataFrame, liq: pd.DataFrame,
-                     weights: dict) -> pd.DataFrame:
-    """Merge 3 dimensions into weighted composite score, keeping numeric scores intact."""
-
-    def _safe_merge(left, right, on):
-        return left[on + ["score"]].merge(right[on + ["score"]], on=on, how="outer", suffixes=("_l", "_r"))
-
-    # Start with all combos
-    all_combos = app[["town", "flat_type"]].copy()
-    all_combos = all_combos.merge(stab[["town", "flat_type"]], on=["town", "flat_type"], how="outer")
-    all_combos = all_combos.merge(liq[["town", "flat_type"]], on=["town", "flat_type"], how="outer")
-
-    merged = all_combos.merge(app[["town", "flat_type", "score"]].rename(columns={"score": "appreciation"}),
-                               on=["town", "flat_type"], how="left")
-    merged = merged.merge(stab[["town", "flat_type", "score"]].rename(columns={"score": "stability"}),
-                          on=["town", "flat_type"], how="left")
-    merged = merged.merge(liq[["town", "flat_type", "score"]].rename(columns={"score": "liquidity"}),
-                          on=["town", "flat_type"], how="left")
-
-    for col in ["appreciation", "stability", "liquidity"]:
-        merged[col] = merged[col].fillna(0)
-
-    w = weights
-    merged["composite"] = (
-        merged["appreciation"] * w["appreciation"]
-        + merged["stability"] * w["stability"]
-        + merged["liquidity"] * w["liquidity"]
-    ).round(2)
-
-    merged["label"] = merged["town"] + " — " + merged["flat_type"]
-    return merged.sort_values("composite", ascending=False)
-
-
-def _render_composite(composite: pd.DataFrame, weights: dict):
-    """Render composite ranking."""
-    display = composite[["town", "flat_type", "appreciation", "stability", "liquidity", "composite"]].copy()
-    display = display.rename(columns={
-        "town": "镇区", "flat_type": "房型",
-        "appreciation": "涨幅", "stability": "稳定性",
-        "liquidity": "流动性", "composite": "综合评分",
-    })
-    st.dataframe(display, width='stretch', hide_index=True)
-
-    fig = go.Figure()
-    top = composite.head(12)
-    fig.add_trace(go.Bar(
-        y=top["label"], x=top["composite"], orientation="h",
-        marker=dict(color=top["composite"], colorscale="Viridis", showscale=True,
-                     colorbar=dict(title="综合评分")),
-        text=[f"{v:.1f}" for v in top["composite"]], textposition="outside",
-    ))
-    fig.update_layout(
-        title="综合评分排名 (Top 12)",
-        height=420, margin=dict(l=0, r=0, t=30, b=0),
-        xaxis_title="综合评分", yaxis=dict(autorange="reversed"),
-    )
-    st.plotly_chart(fig, width='stretch')
-
-    st.caption(f"权重: 涨幅={weights['appreciation']:.0%} | "
-               f"稳定性={weights['stability']:.0%} | 流动性={weights['liquidity']:.0%}")
-
-
-# ==================== RADAR CHART ====================
-
-def _render_radar(composite: pd.DataFrame):
-    """Multi-dimensional radar chart for top candidates."""
-    top = composite.head(6)
-    categories = ["涨幅", "稳定性", "流动性"]
-
-    fig = go.Figure()
-    for _, row in top.iterrows():
-        fig.add_trace(go.Scatterpolar(
-            r=[row["appreciation"], row["stability"], row["liquidity"]],
-            theta=categories, fill="toself", name=row["label"],
-        ))
-    fig.update_layout(
-        polar=dict(radialaxis=dict(range=[0, 100])),
-        title="三维度雷达图 (Top 6)",
-        height=500, margin=dict(l=40, r=40, t=40, b=40),
-    )
-    st.plotly_chart(fig, width='stretch')
-
-
-# ==================== RECOMMENDATION ====================
-
-def _render_recommendation(composite: pd.DataFrame, candidates: pd.DataFrame, filters: dict):
-    """Generate strategy recommendation based on top-ranked groups."""
-    if composite.empty:
-        st.warning("数据不足，无法生成推荐。")
-        return
-
-    top = composite.iloc[0]
-    top_town, top_type = top["town"], top["flat_type"]
-
-    # Subset candidates matching the top recommendation
-    best_deals = candidates[
-        (candidates["town"] == top_town) & (candidates["flat_type"] == top_type)
-    ]
-
-    st.markdown(f"""
-### 首选推荐: **{top_town} — {top_type}**
-
-| 维度 | 评分 | 说明 |
-|------|:---:|------|
-| 涨幅 | **{top['appreciation']:.1f}** | 历史 CAGR 表现评分 |
-| 稳定性 | **{top['stability']:.1f}** | 价格波动性评分 (越高越稳) |
-| 流动性 | **{top['liquidity']:.1f}** | 市场交易活跃度评分 |
-| **综合** | **{top['composite']:.1f}** | 加权综合评分 |
-
-**当前市场中匹配的房源**: {len(best_deals)} 套
-- 均价: {fmt_price(best_deals['resale_price'].mean())}
-- 价格区间: {fmt_price(best_deals['resale_price'].min())} – {fmt_price(best_deals['resale_price'].max())}
-- 平均单价: {fmt_price(best_deals['price_per_sqm'].mean())}/sqm
-""")
-
-    # Alternative recommendations
-    if len(composite) >= 3:
-        st.subheader("备选方案")
-        alts = composite.iloc[1:4]
-        cols = st.columns(len(alts))
-        for i, (_, alt) in enumerate(alts.iterrows()):
-            alt_deals = candidates[
-                (candidates["town"] == alt["town"]) & (candidates["flat_type"] == alt["flat_type"])
-            ]
-            with cols[i]:
-                st.metric(
-                    f"#{i+2} {alt['town']} {alt['flat_type']}",
-                    f"{alt['composite']:.1f} 分",
-                    f"{len(alt_deals)} 套在售",
-                )
-
-    st.divider()
-    st.markdown("""
-    **策略建议:**
-    - **自住需求**: 优先考虑稳定性评分高的选项，减少买入后价格波动风险
-    - **投资需求**: 优先考虑涨幅评分高的选项，关注历史增值趋势
-    - **短期持有 (3–5年)**: 加权流动性，确保转手便利
-    - **长期持有 (10年+)**: 加权涨幅，地段和面积是核心
+1. **细化镇区选择**：不简单地按成熟/非成熟二分，而是按具体镇区的基础设施规划（如 Cross Island Line 站点、JRL 开通时间）细化筛选；
+2. **加入时序动量因子**：关注训练期内涨幅已有加速趋势的 (镇区, 房型) 组合，利用动量效应提升验证期收益；
+3. **动态预算约束**：将预算与利率挂钩——利率下降时适当提高预算，利率上升时收紧，以反映真实的购房能力变化；
+4. **微观地段变量**：如能获取 block 级坐标，应以 block 到 MRT 的实际距离替代镇区级近似距离，显著提升策略的精准度。
     """)
 
+    # ==================== 9.3 COMPOSITE SCORING ====================
 
-# ==================== AFFORDABILITY ====================
+    st.header("🏅 综合评分 (9.3)")
 
-def _render_affordability(filters: dict):
-    """Affordability calculator: down payment, monthly mortgage estimate."""
-    st.markdown("### 月供与首付估算")
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        price = st.number_input("目标房价 (新元)", 200_000, 2_000_000, int(filters["budget_max"]), 10_000)
-        down_pct = st.slider("首付比例 (%)", 10, 50, 25)
-    with c2:
-        rate = st.number_input("年利率 (%)", 0.1, 8.0, 4.0, 0.1)
-        tenure = st.slider("贷款年限", 5, 30, 25)
-    with c3:
-        cpf_oa = st.number_input("CPF OA 月缴 (新元)", 0, 5_000, 800, 100)
-
-    down = price * down_pct / 100
-    loan = price - down
-    monthly_rate = rate / 100 / 12
-    n_payments = tenure * 12
-    if monthly_rate > 0:
-        monthly = loan * monthly_rate * (1 + monthly_rate) ** n_payments / ((1 + monthly_rate) ** n_payments - 1)
+    # Strategy return score: relative to baseline CAGR
+    if bm["年化涨幅 (CAGR)"] > 0:
+        return_score = min(sm["年化涨幅 (CAGR)"] / bm["年化涨幅 (CAGR)"] * 50, 100)
+    elif sm["年化涨幅 (CAGR)"] > 0:
+        return_score = 100
     else:
-        monthly = loan / n_payments
+        return_score = 50
 
-    c1, c2, c3, c4 = st.columns(4)
+    # Stability score: lower volatility → higher score
+    stab_score = max(0, min((1 - sm["价格波动 (CV)"]) * 100, 100))
+    # Liquidity score: lower volume CV → higher score
+    liq_score = max(0, min((1 - sm["成交量 CV"]) * 100, 100))
+    # Budget fit score
+    budget_score = sm["预算适配性"]
+    # Analysis depth: placeholder for teacher assessment
+    depth_score = 70
+
+    composite = (
+        return_score * 0.3
+        + stab_score * 0.2
+        + liq_score * 0.2
+        + budget_score * 0.1
+        + depth_score * 0.2
+    )
+
+    score_df = pd.DataFrame([
+        {"评分项": "策略收益得分 (×0.3)", "得分": f"{return_score:.1f}", "权重": "30%",
+         "说明": f"策略组 CAGR {sm['年化涨幅 (CAGR)']*100:+.2f}% vs 基准 {bm['年化涨幅 (CAGR)']*100:+.2f}%"},
+        {"评分项": "稳定性得分 (×0.2)", "得分": f"{stab_score:.1f}", "权重": "20%",
+         "说明": f"价格波动 {sm['价格波动 (CV)']*100:.2f}%，最大回撤 {sm['最大回撤']*100:.2f}%"},
+        {"评分项": "流动性得分 (×0.2)", "得分": f"{liq_score:.1f}", "权重": "20%",
+         "说明": f"成交量 CV {sm['成交量 CV']*100:.2f}%"},
+        {"评分项": "预算适配得分 (×0.1)", "得分": f"{budget_score:.1f}", "权重": "10%",
+         "说明": f"{sm['预算适配性']:.1f}% 的验证记录在预算内"},
+        {"评分项": "分析深度得分 (×0.2)", "得分": f"{depth_score:.1f}", "权重": "20%",
+         "说明": "教师主观评分 (0–100)，基于策略理由、验证过程和反思质量"},
+    ])
+    st.dataframe(score_df, width='stretch', hide_index=True)
+
+    # Final score display
+    c1, c2 = st.columns([1, 2])
     with c1:
-        st.metric("首付", fmt_price(down))
+        st.metric("🏅 综合得分", f"{composite:.1f} / 100")
+        if composite >= 85:
+            rank_hint = "预估排名: 第1名 (10分)"
+        elif composite >= 75:
+            rank_hint = "预估排名: 第2-3名 (8-9分)"
+        elif composite >= 60:
+            rank_hint = "预估排名: 前50% (7分)"
+        else:
+            rank_hint = "预估排名: 后50% (6分)"
+        st.caption(rank_hint)
     with c2:
-        st.metric("贷款额", fmt_price(loan))
-    with c3:
-        st.metric("月供", fmt_price(monthly))
-    with c4:
-        st.metric("CPF 覆盖后月现金", fmt_price(max(monthly - cpf_oa, 0)))
-    st.caption("以上为粗略估算，不含印花税、律师费、保险等。")
-
-
-# ==================== POLICY ANALYSIS STUB ====================
-
-def _policy_stub_bsd(price: float) -> dict:
-    """计算买方印花税 (Buyer's Stamp Duty) — 待接入 IRAS 最新税率表.
-
-    Args:
-        price: 成交价或市场价 (新元).
-
-    Returns:
-        dict with keys: bsd_amount, effective_rate, notes.
-
-    当前税率 (IRAS 2024):
-      - 首个 S$180,000: 1%
-      - 次个 S$180,000: 2%
-      - 次个 S$640,000: 3%
-      - 余额: 4%
-
-    接入方式: 调用 IRAS 公开税率表或硬编码最新税率。
-    """
-    # Placeholder logic
-    if price <= 180_000:
-        bsd = price * 0.01
-    elif price <= 360_000:
-        bsd = 180_000 * 0.01 + (price - 180_000) * 0.02
-    elif price <= 1_000_000:
-        bsd = 180_000 * 0.01 + 180_000 * 0.02 + (price - 360_000) * 0.03
-    else:
-        bsd = 180_000 * 0.01 + 180_000 * 0.02 + 640_000 * 0.03 + (price - 1_000_000) * 0.04
-    return {"bsd_amount": bsd, "effective_rate": bsd / price * 100 if price > 0 else 0}
-
-
-def _policy_stub_absd(citizenship: str, property_count: int) -> dict:
-    """计算额外买方印花税 (Additional Buyer's Stamp Duty) — 待接入 IRAS 最新政策.
-
-    Args:
-        citizenship: 'SC' (Singapore Citizen), 'SPR' (Permanent Resident), 'Foreigner'.
-        property_count: 名下已有住宅数量。
-
-    Returns:
-        dict with keys: absd_rate, notes.
-
-    当前 ABSD 税率 (2024):
-      - SC 首套: 0%, 二套: 20%, 三套+: 30%
-      - SPR 首套: 5%, 二套: 30%, 三套+: 35%
-      - Foreigner: 60%
-
-    接入方式: 调用 IRAS 公开税率表，或通过 API 查询最新政策。
-    """
-    rates = {
-        ("SC", 0): 0.00, ("SC", 1): 0.20, ("SC", 2): 0.30,
-        ("SPR", 0): 0.05, ("SPR", 1): 0.30, ("SPR", 2): 0.35,
-        ("Foreigner", 0): 0.60,
-    }
-    rate = rates.get((citizenship, min(property_count, 2)), 0.60)
-    return {"absd_rate": rate, "effective": f"{rate*100:.0f}%"}
-
-
-def _policy_stub_hdb_eligibility(household_income: float, citizenship: str) -> dict:
-    """检查 HDB 购买资格 (BTO/转售) — 待接入 HDB 官网最新资格标准.
-
-    Args:
-        household_income: 家庭月收入 (新元).
-        citizenship: 'SC', 'SC+SC', 'SC+SPR', 'SC+Foreigner'.
-
-    Returns:
-        dict with keys: bto_eligible, resale_eligible, grants_available, notes.
-
-    HDB 资格规则:
-      - BTO: 至少 1 位 SC + 1 位 SC/SPR, 家庭收入上限 S$14,000 (4-5房)
-      - 转售: SC+SC, SC+SPR 均可, 无收入上限
-      - CPF Housing Grant: 视收入与公民身份而定
-
-    接入方式: 调用 HDB 官网 API / 定期更新资格表。
-    """
-    eligible = citizenship in ("SC", "SC+SC", "SC+SPR")
-    return {
-        "bto_eligible": False,  # Not applicable for resale
-        "resale_eligible": eligible,
-        "grants_available": ["CPF Housing Grant (EHG)", "Proximity Housing Grant (PHG)"],
-        "notes": "HDB 转售购房资格 — 待接入 HDB 官网实时数据。",
-    }
-
-
-def _policy_analysis_stub(filters: dict):
-    """政策影响分析模块 — 整合 BSD/ABSD/HDB 资格, 展示政策因素对购房决策的影响.
-
-    Args:
-        filters: 当前筛选条件 (预算、房型等)。
-    """
-    st.markdown("""
-    ### 政策影响分析 (待接入实时数据)
-
-    此模块预留接口用于分析以下政策因素对购房策略的影响:
-
-    | 政策因素 | 影响 | 数据来源 |
-    |---------|------|---------|
-    | **BSD (买方印花税)** | 增加购房前期成本 1–4% | IRAS |
-    | **ABSD (额外买方印花税)** | SC 二套 +20%, SPR 首套 +5%, 外国人 +60% | IRAS |
-    | **LTV (贷款价值比)** | HDB 贷款上限 80%, 银行 75% | MAS |
-    | **CPF Housing Grant** | EHG 最高 S$120,000 (视收入) | HDB |
-    | **MSR (按揭偿还率)** | 月供 ≤ 30% 家庭月收入 | MAS |
-    | **MOP (最低居住期)** | 新组屋 5 年内不可转售 | HDB |
-    | **BTO 供应** | 影响转售市场需求与价格 | HDB |
-    | **降温措施** | 额外 ABSD, 贷款收紧等 | MND/MAS |
-
-    **接入方式**: 调用 IRAS/HDB/MAS 公开 API 或定期更新税率表与资格规则。
-    """)
-
-    # Example: BSD calculation for the user's budget midpoint
-    mid_price = (filters["budget_min"] + filters["budget_max"]) / 2
-    bsd_info = _policy_stub_bsd(mid_price)
-    absd_info = _policy_stub_absd("SC", 0)
-    hdb_info = _policy_stub_hdb_eligibility(8000, "SC+SC")
-
-    st.caption(f"示例 (预算中位数 {fmt_price(mid_price)}): "
-               f"BSD ≈ {fmt_price(bsd_info['bsd_amount'])} ({bsd_info['effective_rate']:.1f}%), "
-               f"ABSD (SC 首套) = {absd_info['effective']}, "
-               f"可能的补贴: {', '.join(hdb_info['grants_available'])}")
+        st.caption(
+            "综合得分 = 策略收益×0.3 + 稳定性×0.2 + 流动性×0.2 + "
+            "预算适配×0.1 + 分析深度×0.2"
+        )
+        st.caption(
+            "排名规则: 第1名=10分, 第2名=9分, 第3名=8分, "
+            "前50%=7分, 后50%=6分, 未完成=0分"
+        )
