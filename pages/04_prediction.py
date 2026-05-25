@@ -106,7 +106,7 @@ def run(df: pd.DataFrame):
         st.caption(f"预测目标: **单价 (新元/sqm)** | 有效样本: **{len(model_df):,}** 条")
 
     # ---- 4.2 Train / Test Split (time-based) ----
-    X = model_df[feature_cols]
+    X = model_df[feature_cols + ["flat_type"]]
     y = model_df[target_col]
 
     X_train, X_test = X[X["year"] <= 2023].copy(), X[X["year"] >= 2024].copy()
