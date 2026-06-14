@@ -77,11 +77,11 @@ def run(df: pd.DataFrame):
     df["flat_type_ordinal"] = df["flat_type"].map(FLAT_TYPE_ORDINAL).fillna(0).astype(int)
     df["mrt_dist_km"] = df["town"].apply(_nearest_mrt_dist)
     df["school_count"] = df["town"].apply(lambda t: len(SCHOOLS_BY_TOWN.get(t, [])))
-    df["mature_flag"] = 0  # Punggol / Sengkang / Hougang are all non-mature
+    # Punggol / Sengkang / Hougang are all Northeast region towns
 
     feature_cols = [
         "floor_area_sqm", "remaining_lease", "floor_age", "storey_mid",
-        "flat_type_ordinal", "mrt_dist_km", "school_count", "mature_flag",
+        "flat_type_ordinal", "mrt_dist_km", "school_count",
         "town", "year",
     ]
     target_col = "price_per_sqm"
@@ -99,8 +99,7 @@ def run(df: pd.DataFrame):
         | 房型 | StandardScaler (序数编码) | 2-Room=1, 3-Room=2, 4-Room=3, 5-Room=4, Executive=5, Multi-Gen=6 |
         | MRT 特征 | StandardScaler | 镇区中心到最近 MRT 站距离 (km) |
         | 学校特征 | StandardScaler | 镇区内学校数量 |
-        | 成熟区标志 | Passthrough | 当前三镇区均为非成熟区=0 |
-        | 镇区 | OneHotEncoder | Punggol / Sengkang / Hougang |
+                | 镇区 | OneHotEncoder | Punggol / Sengkang / Hougang |
         | 成交年份 | StandardScaler | 从 `month` 提取 |
         """)
         st.caption(f"预测目标: **单价 (新元/sqm)** | 有效样本: **{len(model_df):,}** 条")
@@ -121,7 +120,7 @@ def run(df: pd.DataFrame):
     # ---- Preprocessor ----
     numeric_cols = [
         "floor_area_sqm", "remaining_lease", "floor_age", "storey_mid",
-        "flat_type_ordinal", "mrt_dist_km", "school_count", "mature_flag", "year",
+        "flat_type_ordinal", "mrt_dist_km", "school_count", "year",
     ]
     categorical_cols = ["town"]
 
@@ -401,7 +400,7 @@ def run(df: pd.DataFrame):
             "floor_area_sqm": u_area, "remaining_lease": u_lease,
             "floor_age": u_age, "storey_mid": u_storey,
             "flat_type_ordinal": u_type_ord, "mrt_dist_km": u_mrt,
-            "school_count": u_schools, "mature_flag": 0,
+            "school_count": u_schools,
             "town": u_town, "year": u_year,
         }])
 
@@ -432,21 +431,40 @@ def run(df: pd.DataFrame):
                     f"(总价 S${lo*u_area:,.0f} – S${hi*u_area:,.0f})"
                 )
 
-        # Similar transactions
+        # Similar transactions — progressive relaxation to find matches
         st.subheader("📋 相似历史成交")
-        similar = df[
-            (df["flat_type"] == u_type)
-            & (df["floor_area_sqm"].between(u_area - 10, u_area + 10))
-            & (df["town"] == u_town)
-        ]
-        if "remaining_lease" in similar.columns:
-            similar = similar[
-                similar["remaining_lease"].between(
-                    max(0, u_lease - 5), u_lease + 5
+
+        def _find_similar(data, town, flat_type, area, lease):
+            """Progressively relax filters until we find matches."""
+            for area_range, lease_range in [(10, 5), (15, 10), (20, 15), (30, 99)]:
+                mask = (
+                    (data["flat_type"] == flat_type)
+                    & (data["town"] == town)
+                    & (data["floor_area_sqm"].between(
+                        max(0, area - area_range), area + area_range))
                 )
+                candidates = data[mask]
+                if "remaining_lease" in candidates.columns and lease_range < 99:
+                    candidates = candidates[
+                        candidates["remaining_lease"].between(
+                            max(0, lease - lease_range), lease + lease_range
+                        )
+                    ]
+                if len(candidates) >= 3:
+                    return candidates.nlargest(10, "month"), area_range, lease_range
+            # Final fallback: same flat_type + town only, no area/lease filter
+            fallback = data[
+                (data["flat_type"] == flat_type) & (data["town"] == town)
             ]
-        similar = similar.nlargest(10, "month")
+            return fallback.nlargest(10, "month"), None, None
+
+        similar, a_rng, l_rng = _find_similar(df, u_town, u_type, u_area, u_lease)
+
         if len(similar) > 0:
+            if a_rng is not None:
+                st.caption(f"匹配条件: 面积 ±{a_rng}sqm, 租约 ±{l_rng}年 → 找到 {len(similar)} 条")
+            else:
+                st.caption(f"放宽至同镇区+同房型 → 找到 {len(similar)} 条")
             sim_disp = similar[[
                 "month", "town", "flat_type", "floor_area_sqm",
                 "remaining_lease", "resale_price", "price_per_sqm",
@@ -456,4 +474,4 @@ def run(df: pd.DataFrame):
                 sim_disp[col] = sim_disp[col].apply(lambda x: f"S${x:,.0f}")
             st.dataframe(sim_disp, width='stretch', hide_index=True)
         else:
-            st.caption("未找到足够相似的历史交易记录。")
+            st.caption("未找到足够相似的历史交易记录，请尝试调整输入参数。")

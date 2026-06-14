@@ -228,7 +228,7 @@ def _build_temporal_map(df: pd.DataFrame, overlays: list) -> pdk.Deck:
     _add_overlay_layers(layers, overlays)
 
     view = pdk.ViewState(latitude=CENTER_LAT, longitude=CENTER_LNG, zoom=12.5, pitch=0)
-    tooltip = {"html": "<b>{town}</b> ({})<br>单价: S${{avg_psm}}/sqm<br>均价: S${{avg_price}}<br>交易量: {{count}}".format(sel_year)}
+    tooltip = {"html": f"<b>{{town}}</b> ({sel_year})<br>单价: S${{avg_psm}}/sqm<br>均价: S${{avg_price}}<br>交易量: {{count}}"}
 
     st.caption(f"({sel_year}) 颜色范围统一: S${vmin:,.0f} – S${vmax:,.0f}/sqm，便于跨年对比")
     return pdk.Deck(layers=layers, initial_view_state=view, tooltip=tooltip,

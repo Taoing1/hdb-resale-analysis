@@ -11,7 +11,7 @@ from data.data_loader import load_data
 
 st.set_page_config(
     page_title="HDB 转售价格分析系统",
-    page_icon="🏠",
+    page_icon="🏠🏠",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -23,8 +23,8 @@ for _name, _file in [
     ("🗺️ 地图可视化", "02_map"),
     ("📈 影响因素分析", "03_factors"),
     ("🤖 价格预测", "04_prediction"),
-    ("🏆 策略验证", "05_strategy"),
-    ("💭 分析思考题", "06_questions"),
+    ("💭 分析思考题", "05_questions"),
+    ("🏆 策略验证", "06_strategy"),
 ]:
     _page_modules[_name] = importlib.import_module(f"pages.{_file}")
 
